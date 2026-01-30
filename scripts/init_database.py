@@ -33,8 +33,10 @@ from src.database.models import (
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
+    ProfileTool,
     SlideDeckPromptLibrary,
     SlideStyleLibrary,
+    ToolLibrary,
 )
 
 

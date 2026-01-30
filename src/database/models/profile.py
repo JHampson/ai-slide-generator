@@ -26,6 +26,7 @@ class ConfigProfile(Base):
     genie_spaces = relationship("ConfigGenieSpace", back_populates="profile", cascade="all, delete-orphan")
     prompts = relationship("ConfigPrompts", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     history = relationship("ConfigHistory", back_populates="profile", cascade="all, delete-orphan")
+    profile_tools = relationship("ProfileTool", back_populates="profile", cascade="all, delete-orphan")
 
     # Note: single_default_profile constraint handled in migration
 

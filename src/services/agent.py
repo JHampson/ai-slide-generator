@@ -6,7 +6,6 @@ capabilities with MLflow tracing integration.
 """
 
 import logging
-import queue
 import re
 import uuid
 from datetime import datetime
@@ -30,9 +29,13 @@ from src.core.databricks_client import (
     get_system_client,
     get_user_client,
 )
-from src.core.settings_db import get_settings
+from src.core.settings_db import ToolSettings, get_settings
+from src.database.models import ToolType
 from src.domain.slide import Slide
-from src.services.tools import initialize_genie_conversation, query_genie_space
+from src.services.tools.genie_tool import (
+    initialize_genie_conversation,
+    query_genie_space,
+)
 from src.utils.html_utils import extract_canvas_ids_from_script, split_script_by_canvas
 from src.utils.js_validator import validate_and_fix_javascript
 
@@ -109,7 +112,7 @@ class SlideGeneratorAgent:
 
     def _setup_mlflow_tracking(self) -> None:
         """Configure MLflow tracking URI only.
-        
+
         Experiments are created per-session in create_session() to provide
         isolated tracking and user-specific permissions.
         """
@@ -129,16 +132,16 @@ class SlideGeneratorAgent:
 
     def _ensure_user_experiment(self, session_id: str, username: str) -> tuple[str, str]:
         """Ensure MLflow experiment exists for this user (one experiment per user).
-        
+
         Creates an experiment if it doesn't exist, or returns the existing one.
         Experiment path:
         - Production: /Workspace/Users/{SP_CLIENT_ID}/{username}/ai-slide-generator
         - Local dev: /Workspace/Users/{username}/ai-slide-generator
-        
+
         Args:
             session_id: Session identifier for logging
             username: User's email/username for path and permissions
-            
+
         Returns:
             Tuple of (experiment_id, experiment_url)
         """
@@ -146,7 +149,7 @@ class SlideGeneratorAgent:
 
         # Determine experiment path based on environment
         sp_folder = get_service_principal_folder()
-        
+
         if sp_folder:
             # Production: use service principal's folder
             experiment_path = f"{sp_folder}/{username}/ai-slide-generator"
@@ -167,7 +170,7 @@ class SlideGeneratorAgent:
         try:
             # Check if experiment already exists
             experiment = mlflow.get_experiment_by_name(experiment_path)
-            
+
             if experiment:
                 experiment_id = experiment.experiment_id
                 logger.info(
@@ -178,13 +181,14 @@ class SlideGeneratorAgent:
                 # Ensure parent folder exists before creating experiment
                 if sp_folder:
                     from src.core.databricks_client import ensure_workspace_folder
+
                     parent_folder = f"{sp_folder}/{username}"
                     try:
                         ensure_workspace_folder(parent_folder)
                     except Exception as e:
                         logger.warning(f"Failed to create parent folder {parent_folder}: {e}")
                         # Continue anyway - experiment creation might still work
-                
+
                 # Create new experiment for user
                 experiment_id = mlflow.create_experiment(experiment_path)
                 logger.info(
@@ -220,10 +224,10 @@ class SlideGeneratorAgent:
         self, experiment_id: str, username: str, session_id: str
     ) -> None:
         """Grant CAN_MANAGE permission on experiment to user.
-        
+
         Uses the Databricks SDK to set experiment permissions so users can
         view and manage their session's experiment data.
-        
+
         Args:
             experiment_id: MLflow experiment ID
             username: User's email/username to grant permission to
@@ -304,106 +308,282 @@ class SlideGeneratorAgent:
         This eliminates the race condition from using self.current_session_id
         by binding the session_id at tool creation time.
 
-        When no Genie space is configured, returns an empty list and the agent
-        runs in prompt-only mode without data query capabilities.
+        Uses the new multi-tool system from settings.tools, with fallback to
+        legacy settings.genie for backward compatibility.
 
         Args:
             session_id: Session identifier to bind to the tool
 
         Returns:
-            List of StructuredTool instances for this session (empty if no Genie)
+            List of StructuredTool instances for this session (empty if no tools)
         """
-        # Return empty tools if no Genie configured (prompt-only mode)
-        if not self.settings.genie:
-            logger.info(
-                "No Genie configured, running without tools",
-                extra={"session_id": session_id},
-            )
-            return []
-
-        # Get session reference for use in closure
+        # Get session reference
         session = self.sessions.get(session_id)
         if session is None:
             raise ToolExecutionError(f"Session not found: {session_id}")
 
-        def _query_genie_wrapper(query: str) -> str:
-            """
-            Wrapper that auto-injects conversation_id from bound session.
+        # Check for new multi-tool system first
+        if self.settings.tools:
+            # Use new tool factory with session's Genie conversations
+            genie_conversations = session.get("genie_conversations", {})
+            tools = self._create_tools_from_settings(session_id, session, genie_conversations)
+            logger.info(
+                "Tools created from profile configuration",
+                extra={"session_id": session_id, "tool_count": len(tools)},
+            )
+            return tools
 
-            The session_id is captured via closure at tool creation time,
-            eliminating race conditions from concurrent requests.
-            """
-            conversation_id = session["genie_conversation_id"]
-            if conversation_id is None:
-                # Initialize new Genie conversation (happens after profile reload)
-                logger.info(
-                    "Initializing new Genie conversation for session",
-                    extra={"session_id": session_id},
-                )
-                try:
-                    new_conv_id = initialize_genie_conversation()
-                    session["genie_conversation_id"] = new_conv_id
-                    conversation_id = new_conv_id
-                    logger.info(
-                        "New Genie conversation initialized",
-                        extra={
-                            "session_id": session_id,
-                            "genie_conversation_id": conversation_id,
-                        },
+        # Fallback to legacy Genie-only mode
+        if not self.settings.genie:
+            logger.info(
+                "No tools configured, running in prompt-only mode",
+                extra={"session_id": session_id},
+            )
+            return []
+
+        # Legacy: single Genie tool
+        return self._create_legacy_genie_tool(session_id, session)
+
+    def _create_tools_from_settings(
+        self,
+        session_id: str,
+        session: dict,
+        genie_conversations: dict[int, str],
+    ) -> list[StructuredTool]:
+        """Create tools from the new ToolSettings configuration.
+
+        Args:
+            session_id: Session identifier
+            session: Session dict for storing state
+            genie_conversations: Dict mapping tool_id to conversation_id
+
+        Returns:
+            List of LangChain StructuredTool instances
+        """
+        tools = []
+
+        for tool_setting in self.settings.tools:
+            if not tool_setting.is_enabled:
+                continue
+
+            try:
+                if tool_setting.tool_type == ToolType.GENIE_SPACE.value:
+                    # Create Genie tool with session-bound conversation
+                    tool = self._create_genie_tool_from_settings(
+                        tool_setting, session_id, session, genie_conversations
                     )
+                    if tool:
+                        tools.append(tool)
+
+                elif tool_setting.tool_type == ToolType.VECTOR_INDEX.value:
+                    from src.services.tools.vector_tool import create_vector_tool
+
+                    # Create a minimal ToolLibrary-like object
+                    tool_def = type(
+                        "ToolDef",
+                        (),
+                        {
+                            "name": tool_setting.name,
+                            "description": tool_setting.description,
+                            "config": tool_setting.config,
+                        },
+                    )()
+                    description = tool_setting.description_override or tool_setting.description
+                    tool = create_vector_tool(tool_def, description)
+                    tools.append(tool)
+
+                elif tool_setting.tool_type == ToolType.MCP_SERVER.value:
+                    from src.services.tools.mcp_tool import create_mcp_tools
+
+                    tool_def = type(
+                        "ToolDef",
+                        (),
+                        {
+                            "name": tool_setting.name,
+                            "description": tool_setting.description,
+                            "config": tool_setting.config,
+                        },
+                    )()
+                    description = tool_setting.description_override or tool_setting.description
+                    mcp_tools = create_mcp_tools(tool_def, description)
+                    tools.extend(mcp_tools)
+
+                elif tool_setting.tool_type == ToolType.UC_FUNCTION.value:
+                    from src.services.tools.uc_function_tool import (
+                        create_uc_function_tool,
+                    )
+
+                    tool_def = type(
+                        "ToolDef",
+                        (),
+                        {
+                            "name": tool_setting.name,
+                            "description": tool_setting.description,
+                            "config": tool_setting.config,
+                        },
+                    )()
+                    description = tool_setting.description_override or tool_setting.description
+                    tool = create_uc_function_tool(tool_def, description)
+                    tools.append(tool)
+
+            except Exception as e:
+                logger.error(f"Failed to create tool {tool_setting.name}: {e}")
+                # Continue with other tools
+
+        return tools
+
+    def _create_genie_tool_from_settings(
+        self,
+        tool_setting: ToolSettings,
+        session_id: str,
+        session: dict,
+        genie_conversations: dict[int, str],
+    ) -> Optional[StructuredTool]:
+        """Create a Genie tool from ToolSettings with session binding.
+
+        Args:
+            tool_setting: ToolSettings for the Genie space
+            session_id: Session identifier
+            session: Session dict
+            genie_conversations: Conversation ID cache
+
+        Returns:
+            StructuredTool or None if creation fails
+        """
+        space_id = tool_setting.config.get("space_id")
+        space_name = tool_setting.config.get("space_name", tool_setting.name)
+
+        if not space_id:
+            logger.warning(f"Genie tool {tool_setting.name} missing space_id")
+            return None
+
+        # Get or initialize conversation ID
+        tool_id = tool_setting.id
+        conversation_id = genie_conversations.get(tool_id)
+
+        def _query_wrapper(query: str) -> str:
+            nonlocal conversation_id
+
+            # Initialize conversation if needed
+            if conversation_id is None:
+                try:
+                    conversation_id = initialize_genie_conversation(space_id)
+                    genie_conversations[tool_id] = conversation_id
+                    session["genie_conversations"] = genie_conversations
                 except Exception as e:
-                    logger.error(f"Failed to initialize Genie conversation: {e}")
+                    logger.error(f"Failed to init Genie conversation: {e}")
                     raise ToolExecutionError(f"Failed to initialize Genie conversation: {e}") from e
 
-            # Query Genie with automatic conversation_id
-            result = query_genie_space(query, conversation_id)
+            # Query Genie
+            result = query_genie_space(
+                space_id=space_id,
+                query=query,
+                conversation_id=conversation_id,
+            )
 
-            # Format response for LLM (no conversation_id exposed)
+            # Update conversation ID
+            if result.get("conversation_id"):
+                conversation_id = result["conversation_id"]
+                genie_conversations[tool_id] = conversation_id
+
+            # Format response
             response_parts = []
-
-            if result.get('message'):
+            if result.get("message"):
                 response_parts.append(f"Genie response: {result['message']}")
-
-            if result.get('data'):
+            if result.get("data"):
                 response_parts.append(f"Data retrieved:\n\n{result['data']}")
 
-            if not response_parts:
-                return "Query completed but no data or message was returned."
+            return (
+                "\n\n".join(response_parts)
+                if response_parts
+                else "Query completed but no data or message was returned."
+            )
 
-            return "\n\n".join(response_parts)
+        # Generate unique tool name
+        tool_name = f"query_{tool_setting.name.lower().replace(' ', '_').replace('-', '_')}"
+
+        # Build description
+        description = tool_setting.description_override or tool_setting.description
+        full_description = (
+            f"Query {space_name} for data using natural language questions. "
+            "Genie understands natural language and converts it to SQL.\n\n"
+            "USAGE GUIDELINES:\n"
+            "- Make multiple queries to gather comprehensive data\n"
+            "- Use follow-up queries to drill deeper into findings\n"
+            "- Conversation context is automatically maintained\n\n"
+            f"DATA AVAILABLE:\n{description}"
+        )
+
+        return StructuredTool.from_function(
+            func=_query_wrapper,
+            name=tool_name,
+            description=full_description,
+            args_schema=GenieQueryInput,
+        )
+
+    def _create_legacy_genie_tool(self, session_id: str, session: dict) -> list[StructuredTool]:
+        """Create legacy single Genie tool for backward compatibility.
+
+        Args:
+            session_id: Session identifier
+            session: Session dict
+
+        Returns:
+            List with single Genie StructuredTool
+        """
+
+        def _query_genie_wrapper(query: str) -> str:
+            conversation_id = session.get("genie_conversation_id")
+            if conversation_id is None:
+                try:
+                    space_id = self.settings.genie.space_id
+                    new_conv_id = initialize_genie_conversation(space_id)
+                    session["genie_conversation_id"] = new_conv_id
+                    conversation_id = new_conv_id
+                except Exception as e:
+                    raise ToolExecutionError(f"Failed to initialize Genie conversation: {e}") from e
+
+            result = query_genie_space(
+                space_id=self.settings.genie.space_id,
+                query=query,
+                conversation_id=conversation_id,
+            )
+
+            response_parts = []
+            if result.get("message"):
+                response_parts.append(f"Genie response: {result['message']}")
+            if result.get("data"):
+                response_parts.append(f"Data retrieved:\n\n{result['data']}")
+
+            return (
+                "\n\n".join(response_parts)
+                if response_parts
+                else "Query completed but no data or message was returned."
+            )
 
         genie_tool = StructuredTool.from_function(
             func=_query_genie_wrapper,
             name="query_genie_space",
             description=(
                 "Query Databricks Genie for data using natural language questions. "
-                "Genie understands natural language and converts it to SQL - do not write SQL yourself.\n\n"
-                "USAGE GUIDELINES:\n"
-                "- Make multiple queries to gather comprehensive data (typically 5-8 strategic queries)\n"
-                "- Use follow-up queries to drill deeper into interesting findings\n"
-                "- Conversation context is automatically maintained across queries\n"
-                "- If initial data is insufficient, query for more specific information\n\n"
-                "WHEN TO STOP:\n"
-                "- Once you have sufficient data, STOP calling this tool\n"
-                "- Transition immediately to generating the HTML presentation\n"
-                "- Do NOT make additional queries once you have enough information\n\n"
+                "Genie understands natural language and converts it to SQL.\n\n"
                 f"DATA AVAILABLE:\n{self.settings.genie.description}"
             ),
             args_schema=GenieQueryInput,
         )
 
-        logger.info("Tools created for session", extra={"session_id": session_id})
+        logger.info("Legacy Genie tool created", extra={"session_id": session_id})
         return [genie_tool]
 
     def _create_prompt(self) -> ChatPromptTemplate:
         """Create prompt template with system prompt from settings and chat history.
-        
+
         Prompt structure (when all components present):
         1. Deck prompt (from library) - defines presentation type/content (WHAT to create)
         2. Slide style (from library) - defines visual appearance (HOW it should look)
         3. System prompt - defines technical generation rules (HOW to generate valid HTML/charts)
         4. Slide editing instructions - defines editing behavior
-        
+
         The system prompt is tool-agnostic - the LLM discovers available tools
         through the tool binding mechanism, not the prompt.
         """
@@ -419,22 +599,22 @@ class SlideGeneratorAgent:
 
         # Build the complete system prompt
         prompt_parts = []
-        
+
         # Deck prompt comes first - sets context for what type of presentation to create
         if deck_prompt:
             prompt_parts.append(f"PRESENTATION CONTEXT:\n{deck_prompt.strip()}")
-        
+
         # Slide style defines visual appearance (user-controllable)
         if slide_style:
             prompt_parts.append(slide_style.strip())
-        
+
         # Core system prompt for technical slide generation (hidden from regular users)
         prompt_parts.append(system_prompt.rstrip())
-        
+
         # Editing instructions appended at the end
         if editing_prompt:
             prompt_parts.append(editing_prompt.strip())
-        
+
         full_system_prompt = "\n\n".join(prompt_parts)
 
         # Escape curly braces to allow user prompts with HTML/JS/JSON content
@@ -456,7 +636,7 @@ class SlideGeneratorAgent:
                 "has_deck_prompt": bool(deck_prompt),
                 "has_slide_style": bool(slide_style),
                 "has_editing_prompt": bool(editing_prompt),
-            }
+            },
         )
         return prompt
 
@@ -513,7 +693,7 @@ class SlideGeneratorAgent:
         - Genie conversation_id (initialized if Genie configured, None otherwise)
         - MLflow experiment (created in SP folder with user permissions)
         - Session metadata
-        
+
         Note: Genie conversation is initialized upfront when configured.
         Sessions without Genie run in prompt-only mode.
         """
@@ -536,9 +716,7 @@ class SlideGeneratorAgent:
         experiment_id = None
         experiment_url = None
         try:
-            experiment_id, experiment_url = self._ensure_user_experiment(
-                session_id, username
-            )
+            experiment_id, experiment_url = self._ensure_user_experiment(session_id, username)
             # Set as active experiment for this session
             mlflow.set_experiment(experiment_id=experiment_id)
         except Exception as e:
@@ -547,11 +725,35 @@ class SlideGeneratorAgent:
                 extra={"session_id": session_id, "error": str(e)},
             )
 
-        # Initialize Genie conversation only if configured
-        genie_conversation_id = None
-        if self.settings.genie:
+        # Initialize Genie conversations for all Genie tools
+        genie_conversations = {}
+        genie_conversation_id = None  # Legacy: single conversation
+
+        # New multi-tool system
+        if self.settings.tools:
+            for tool_setting in self.settings.tools:
+                if tool_setting.is_enabled and tool_setting.tool_type == ToolType.GENIE_SPACE.value:
+                    space_id = tool_setting.config.get("space_id")
+                    if space_id:
+                        try:
+                            conv_id = initialize_genie_conversation(space_id)
+                            genie_conversations[tool_setting.id] = conv_id
+                            logger.info(
+                                f"Initialized Genie conversation for {tool_setting.name}",
+                                extra={
+                                    "session_id": session_id,
+                                    "tool_id": tool_setting.id,
+                                    "conversation_id": conv_id,
+                                },
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to init Genie for {tool_setting.name}: {e}")
+                            # Continue - conversation will be initialized on first use
+
+        # Legacy single Genie fallback
+        elif self.settings.genie:
             try:
-                genie_conversation_id = initialize_genie_conversation()
+                genie_conversation_id = initialize_genie_conversation(self.settings.genie.space_id)
                 logger.info(
                     "Genie conversation initialized for session",
                     extra={
@@ -564,7 +766,7 @@ class SlideGeneratorAgent:
                 raise AgentError(f"Failed to initialize Genie conversation: {e}") from e
         else:
             logger.info(
-                "No Genie configured, session will run in prompt-only mode",
+                "No tools configured, session will run in prompt-only mode",
                 extra={"session_id": session_id},
             )
 
@@ -576,7 +778,8 @@ class SlideGeneratorAgent:
         session_timestamp = datetime.utcnow().isoformat()
         self.sessions[session_id] = {
             "chat_history": chat_history,
-            "genie_conversation_id": genie_conversation_id,  # None if no Genie
+            "genie_conversation_id": genie_conversation_id,  # Legacy: single Genie
+            "genie_conversations": genie_conversations,  # New: multi-tool Genie convs
             "experiment_id": experiment_id,
             "experiment_url": experiment_url,
             "username": username,
@@ -724,10 +927,7 @@ class SlideGeneratorAgent:
 
         lower_response = llm_response.lower()
         for pattern in confusion_patterns:
-            if (
-                pattern.lower() in lower_response
-                and '<div class="slide"' not in llm_response
-            ):
+            if pattern.lower() in lower_response and '<div class="slide"' not in llm_response:
                 return (
                     False,
                     f"LLM returned conversational text instead of HTML: {pattern}",
@@ -741,9 +941,7 @@ class SlideGeneratorAgent:
 
         return True, ""
 
-    def _deduplicate_canvas_ids(
-        self, html_content: str, scripts: str
-    ) -> Tuple[str, str]:
+    def _deduplicate_canvas_ids(self, html_content: str, scripts: str) -> Tuple[str, str]:
         """
         RC4: Generate unique canvas IDs to prevent collisions.
 
@@ -890,16 +1088,12 @@ class SlideGeneratorAgent:
         # RC4: Deduplicate canvas IDs to prevent collisions
         for slide in replacement_slides:
             if "<canvas" in slide.html:
-                slide.html, slide.scripts = self._deduplicate_canvas_ids(
-                    slide.html, slide.scripts
-                )
+                slide.html, slide.scripts = self._deduplicate_canvas_ids(slide.html, slide.scripts)
 
         # RC5: Validate and fix JavaScript syntax
         for idx, slide in enumerate(replacement_slides):
             if slide.scripts:
-                fixed_script, was_fixed, error = validate_and_fix_javascript(
-                    slide.scripts
-                )
+                fixed_script, was_fixed, error = validate_and_fix_javascript(slide.scripts)
                 if was_fixed:
                     slide.scripts = fixed_script
                     logger.info(
@@ -954,18 +1148,18 @@ class SlideGeneratorAgent:
 
     def _extract_css_from_response(self, soup: BeautifulSoup) -> str:
         """Extract CSS content from LLM response.
-        
+
         Args:
             soup: BeautifulSoup parsed HTML
-            
+
         Returns:
             Concatenated CSS from all <style> tags
         """
         css_parts = []
-        for style_tag in soup.find_all('style'):
+        for style_tag in soup.find_all("style"):
             if style_tag.string:
                 css_parts.append(style_tag.string.strip())
-        return '\n'.join(css_parts)
+        return "\n".join(css_parts)
 
     def _validate_canvas_scripts_in_html(self, html_content: str) -> None:
         """
@@ -982,18 +1176,13 @@ class SlideGeneratorAgent:
 
         soup = BeautifulSoup(html_content, "html.parser")
         canvases = soup.find_all("canvas")
-        canvas_ids = [
-            canvas.get("id")
-            for canvas in canvases
-            if canvas.get("id")
-        ]
+        canvas_ids = [canvas.get("id") for canvas in canvases if canvas.get("id")]
 
         if not canvas_ids:
             return
 
         script_text = "\n".join(
-            script_tag.get_text() or ""
-            for script_tag in soup.find_all("script")
+            script_tag.get_text() or "" for script_tag in soup.find_all("script")
         )
 
         referenced_ids = set(extract_canvas_ids_from_script(script_text))
@@ -1196,9 +1385,7 @@ class SlideGeneratorAgent:
                         )
 
                         # Validate retry
-                        is_valid, error_msg = self._validate_editing_response(
-                            html_output
-                        )
+                        is_valid, error_msg = self._validate_editing_response(html_output)
                         if not is_valid:
                             logger.error(
                                 f"LLM failed to return valid slide HTML after retry: {error_msg}",
@@ -1328,9 +1515,7 @@ class SlideGeneratorAgent:
         tools = self._create_tools_for_session(session_id)
 
         # Create agent executor with callback handler
-        agent_executor = self._create_agent_executor_with_callbacks(
-            tools, [callback_handler]
-        )
+        agent_executor = self._create_agent_executor_with_callbacks(tools, [callback_handler])
 
         editing_mode = slide_context is not None
         is_add_operation = False
@@ -1423,9 +1608,7 @@ class SlideGeneratorAgent:
                         )
 
                         # Validate retry
-                        is_valid, error_msg = self._validate_editing_response(
-                            html_output
-                        )
+                        is_valid, error_msg = self._validate_editing_response(html_output)
                         if not is_valid:
                             logger.error(
                                 f"LLM failed to return valid slide HTML after retry: {error_msg}",

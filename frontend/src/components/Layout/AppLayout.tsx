@@ -7,6 +7,7 @@ import { ProfileSelector } from '../config/ProfileSelector';
 import { ProfileList } from '../config/ProfileList';
 import { DeckPromptList } from '../config/DeckPromptList';
 import { SlideStyleList } from '../config/SlideStyleList';
+import { ToolLibraryPage } from '../config/ToolLibraryPage';
 import { SessionHistory } from '../History/SessionHistory';
 import { SaveAsDialog } from '../History/SaveAsDialog';
 import { HelpPage } from '../Help';
@@ -17,7 +18,7 @@ import { useProfiles } from '../../contexts/ProfileContext';
 import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { api } from '../../services/api';
 
-type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'history' | 'help';
+type ViewMode = 'main' | 'profiles' | 'deck_prompts' | 'slide_styles' | 'tool_library' | 'history' | 'help';
 
 export const AppLayout: React.FC = () => {
   const [slideDeck, setSlideDeck] = useState<SlideDeck | null>(null);
@@ -230,6 +231,20 @@ export const AppLayout: React.FC = () => {
                 Slide Styles
               </button>
               <button
+                onClick={() => setViewMode('tool_library')}
+                disabled={isGenerating}
+                className={`px-3 py-1.5 rounded text-sm transition-colors ${
+                  viewMode === 'tool_library'
+                    ? 'bg-blue-700 text-white'
+                    : isGenerating
+                    ? 'bg-blue-400 text-blue-200 cursor-not-allowed opacity-50'
+                    : 'bg-blue-500 hover:bg-blue-700 text-blue-100'
+                }`}
+                title={isGenerating ? 'Navigation disabled during generation' : 'Manage app-level tools'}
+              >
+                Tool Library
+              </button>
+              <button
                 onClick={() => setViewMode('help')}
                 disabled={isGenerating}
                 className={`px-3 py-1.5 rounded text-sm transition-colors ${
@@ -333,6 +348,12 @@ export const AppLayout: React.FC = () => {
           <div className="max-w-7xl mx-auto p-6">
             <SlideStyleList />
           </div>
+        </div>
+      )}
+
+      {viewMode === 'tool_library' && (
+        <div className="flex-1 overflow-auto bg-gray-50">
+          <ToolLibraryPage onClose={() => setViewMode('main')} />
         </div>
       )}
 

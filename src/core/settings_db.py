@@ -20,6 +20,8 @@ from src.database.models import (
     ConfigGenieSpace,
     ConfigProfile,
     ConfigPrompts,
+    ProfileTool,
+    ToolLibrary,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,12 +58,27 @@ class LLMSettings(BaseSettings):
 
 
 class GenieSettings(BaseSettings):
-    """Genie configuration settings."""
+    """Genie configuration settings (legacy - use ToolSettings instead)."""
 
     model_config = SettingsConfigDict(extra="allow", populate_by_name=True)
 
     space_id: str = Field(alias="default_space_id")
     description: str = Field(default="")
+
+
+class ToolSettings(BaseSettings):
+    """Settings for a single tool from the library."""
+
+    model_config = SettingsConfigDict(extra="allow")
+
+    id: int  # Tool library ID
+    tool_type: str  # ToolType enum value
+    name: str
+    description: str = ""
+    config: dict = Field(default_factory=dict)
+    is_enabled: bool = True
+    description_override: str = ""  # Profile-specific override
+    priority: int = 0
 
 
 class APISettings(BaseSettings):
@@ -70,10 +87,12 @@ class APISettings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     cors_enabled: bool = True
-    cors_origins: list[str] = Field(default_factory=lambda: [
-        "http://localhost:3000",
-        "http://localhost:5173",
-    ])
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:5173",
+        ]
+    )
     request_timeout: int = 180
     max_concurrent_requests: int = 10
 
@@ -133,7 +152,8 @@ class AppSettings(BaseSettings):
 
     # Configuration from database
     llm: LLMSettings
-    genie: Optional[GenieSettings] = None  # Optional - enables data queries when configured
+    genie: Optional[GenieSettings] = None  # Legacy - use tools instead
+    tools: list[ToolSettings] = Field(default_factory=list)  # Profile tools
 
     # Prompts (from database)
     prompts: dict[str, Any] = Field(default_factory=dict)
@@ -207,9 +227,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 raise ValueError(f"AI infra settings not found for profile {profile.id}")
 
             # Get the Genie space for this profile (optional - one per profile)
-            genie_space = db.query(ConfigGenieSpace).filter_by(
-                profile_id=profile.id
-            ).first()
+            genie_space = db.query(ConfigGenieSpace).filter_by(profile_id=profile.id).first()
             # Genie space is optional - profiles without Genie run in prompt-only mode
 
             prompts = db.query(ConfigPrompts).filter_by(profile_id=profile.id).first()
@@ -220,30 +238,40 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
             deck_prompt_content = None
             if prompts.selected_deck_prompt_id:
                 from src.database.models import SlideDeckPromptLibrary
-                deck_prompt = db.query(SlideDeckPromptLibrary).filter_by(
-                    id=prompts.selected_deck_prompt_id,
-                    is_active=True
-                ).first()
+
+                deck_prompt = (
+                    db.query(SlideDeckPromptLibrary)
+                    .filter_by(id=prompts.selected_deck_prompt_id, is_active=True)
+                    .first()
+                )
                 if deck_prompt:
                     deck_prompt_content = deck_prompt.prompt_content
                     logger.info(
                         "Loaded deck prompt",
-                        extra={"deck_prompt_name": deck_prompt.name, "deck_prompt_id": deck_prompt.id}
+                        extra={
+                            "deck_prompt_name": deck_prompt.name,
+                            "deck_prompt_id": deck_prompt.id,
+                        },
                     )
 
             # Load slide style content if selected
             slide_style_content = None
             if prompts.selected_slide_style_id:
                 from src.database.models import SlideStyleLibrary
-                slide_style = db.query(SlideStyleLibrary).filter_by(
-                    id=prompts.selected_slide_style_id,
-                    is_active=True
-                ).first()
+
+                slide_style = (
+                    db.query(SlideStyleLibrary)
+                    .filter_by(id=prompts.selected_slide_style_id, is_active=True)
+                    .first()
+                )
                 if slide_style:
                     slide_style_content = slide_style.style_content
                     logger.info(
                         "Loaded slide style",
-                        extra={"slide_style_name": slide_style.name, "slide_style_id": slide_style.id}
+                        extra={
+                            "slide_style_name": slide_style.name,
+                            "slide_style_id": slide_style.id,
+                        },
                     )
 
             # Create settings
@@ -255,12 +283,40 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 timeout=600,  # Default value
             )
 
-            # Create Genie settings only if configured
+            # Create Genie settings only if configured (legacy support)
             genie_settings = None
             if genie_space:
                 genie_settings = GenieSettings(
                     default_space_id=genie_space.space_id,
                     description=genie_space.description or "",
+                )
+
+            # Load profile tools (new multi-tool system)
+            profile_tools = (
+                db.query(ProfileTool)
+                .join(ToolLibrary)
+                .filter(
+                    ProfileTool.profile_id == profile.id,
+                    ToolLibrary.is_active == True,  # noqa: E712
+                )
+                .order_by(ProfileTool.priority)
+                .all()
+            )
+
+            tool_settings_list = []
+            for pt in profile_tools:
+                tool = pt.tool
+                tool_settings_list.append(
+                    ToolSettings(
+                        id=tool.id,
+                        tool_type=tool.tool_type,
+                        name=tool.name,
+                        description=tool.description or "",
+                        config=tool.config or {},
+                        is_enabled=pt.is_enabled,
+                        description_override=pt.description_override or "",
+                        priority=pt.priority,
+                    )
                 )
 
             settings = AppSettings(
@@ -269,6 +325,7 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                 profile_name=profile.name,
                 llm=llm_settings,
                 genie=genie_settings,
+                tools=tool_settings_list,
                 prompts={
                     "deck_prompt": deck_prompt_content or "",
                     "slide_style": slide_style_content or "",
@@ -285,7 +342,8 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
                     "profile_name": profile.name,
                     "llm_endpoint": ai_infra.llm_endpoint,
                     "genie_space": genie_space.space_name if genie_space else None,
-                    "prompt_only_mode": genie_space is None,
+                    "tools_count": len(tool_settings_list),
+                    "prompt_only_mode": genie_space is None and len(tool_settings_list) == 0,
                 },
             )
 
@@ -362,4 +420,3 @@ def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
     )
 
     return settings
-

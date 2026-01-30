@@ -2,7 +2,7 @@
 Unit tests for tools module with MLFlow tracing.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -16,24 +16,16 @@ from src.services.tools import (
 @pytest.fixture
 def mock_databricks_client():
     """Mock Databricks client for testing (user client for Genie operations)."""
-    with patch("src.services.tools.get_user_client") as mock_client:
+    with patch("src.services.tools.genie_tool.get_user_client") as mock_client:
         client = Mock()
         mock_client.return_value = client
         yield client
 
 
-@pytest.fixture
-def mock_settings():
-    """Mock settings for testing."""
-    with patch("src.services.tools.get_settings") as mock_settings_fn:
-        settings = Mock()
-        settings.genie.space_id = "test-space-id"
-        settings.genie.timeout = 60
-        mock_settings_fn.return_value = settings
-        yield settings
+TEST_SPACE_ID = "test-space-id"
 
 
-def test_query_genie_space_success(mock_databricks_client, mock_settings):
+def test_query_genie_space_success(mock_databricks_client):
     """Test successful Genie query with both message and data."""
     # Setup mock conversation response
     conversation_response = Mock()
@@ -73,7 +65,7 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings):
     mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
 
     # Execute query
-    response = query_genie_space(query="What were Q4 sales?")
+    response = query_genie_space(space_id=TEST_SPACE_ID, query="What were Q4 sales?")
 
     # Verify response has all expected fields
     assert response["conversation_id"] == "conv-123"
@@ -92,9 +84,7 @@ def test_query_genie_space_success(mock_databricks_client, mock_settings):
     mock_databricks_client.genie.get_message_attachment_query_result.assert_called_once()
 
 
-def test_query_genie_space_message_only(
-    mock_databricks_client, mock_settings
-):
+def test_query_genie_space_message_only(mock_databricks_client):
     """Test Genie query with message only (no data attachment)."""
     # Setup mock conversation response with attachment but no query data
     conversation_response = Mock()
@@ -111,7 +101,7 @@ def test_query_genie_space_message_only(
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
     # Execute query - should succeed with message only
-    response = query_genie_space(query="Test query")
+    response = query_genie_space(space_id=TEST_SPACE_ID, query="Test query")
 
     # Verify response has message but empty data
     assert response["conversation_id"] == "conv-123"
@@ -122,9 +112,7 @@ def test_query_genie_space_message_only(
     assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 1
 
 
-def test_query_genie_space_retry_success(
-    mock_databricks_client, mock_settings
-):
+def test_query_genie_space_retry_success(mock_databricks_client):
     """Test Genie query succeeds after retry on error."""
     # Second response: success with data
     success_response = Mock()
@@ -166,7 +154,7 @@ def test_query_genie_space_retry_success(
     mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
     
     # Execute query
-    response = query_genie_space(query="Test query")
+    response = query_genie_space(space_id=TEST_SPACE_ID, query="Test query")
     
     # Verify success after retry
     assert response["conversation_id"] == "conv-123"
@@ -182,7 +170,7 @@ def test_query_genie_space_retry_success(
     assert mock_databricks_client.genie.start_conversation_and_wait.call_count == 2
 
 
-def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
+def test_query_genie_space_empty_data(mock_databricks_client):
     """Test Genie query returning empty data array."""
     # Setup mock conversation response
     conversation_response = Mock()
@@ -218,7 +206,7 @@ def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
     mock_databricks_client.genie.get_message_attachment_query_result.return_value = attachment_result
 
     # Execute query
-    response = query_genie_space(query="Non-existent data")
+    response = query_genie_space(space_id=TEST_SPACE_ID, query="Non-existent data")
 
     # Verify response has message and data (empty CSV with just header)
     assert response["conversation_id"] == "conv-empty"
@@ -231,19 +219,19 @@ def test_query_genie_space_empty_data(mock_databricks_client, mock_settings):
     assert "col1" in lines[0]
 
 
-def test_query_genie_space_error(mock_databricks_client, mock_settings):
+def test_query_genie_space_error(mock_databricks_client):
     """Test Genie query with error."""
     # Setup mock to raise exception
     mock_databricks_client.genie.start_conversation_and_wait.side_effect = Exception("Connection error")
 
     # Execute query and expect error
     with pytest.raises(GenieToolError) as exc_info:
-        query_genie_space(query="Test query")
+        query_genie_space(space_id=TEST_SPACE_ID, query="Test query")
 
     assert "Failed to query Genie space" in str(exc_info.value)
 
 
-def test_initialize_genie_conversation_success(mock_databricks_client, mock_settings):
+def test_initialize_genie_conversation_success(mock_databricks_client):
     """Test successful Genie conversation initialization."""
     # Setup mock conversation response
     conversation_response = Mock()
@@ -253,7 +241,7 @@ def test_initialize_genie_conversation_success(mock_databricks_client, mock_sett
     mock_databricks_client.genie.start_conversation_and_wait.return_value = conversation_response
 
     # Initialize conversation
-    conversation_id = initialize_genie_conversation()
+    conversation_id = initialize_genie_conversation(space_id=TEST_SPACE_ID)
 
     # Verify conversation_id returned
     assert conversation_id == "conv-init-123"
@@ -261,19 +249,18 @@ def test_initialize_genie_conversation_success(mock_databricks_client, mock_sett
     # Verify client called with correct space_id
     mock_databricks_client.genie.start_conversation_and_wait.assert_called_once()
     call_kwargs = mock_databricks_client.genie.start_conversation_and_wait.call_args.kwargs
-    assert call_kwargs["space_id"] == "test-space-id"
+    assert call_kwargs["space_id"] == TEST_SPACE_ID
     assert "content" in call_kwargs
     assert len(call_kwargs["content"]) > 0  # Some initialization message
 
 
-def test_initialize_genie_conversation_error(mock_databricks_client, mock_settings):
+def test_initialize_genie_conversation_error(mock_databricks_client):
     """Test Genie conversation initialization with error."""
     # Setup mock to raise exception
     mock_databricks_client.genie.start_conversation_and_wait.side_effect = Exception("Init error")
 
     # Execute and expect error
     with pytest.raises(GenieToolError) as exc_info:
-        initialize_genie_conversation()
+        initialize_genie_conversation(space_id=TEST_SPACE_ID)
 
     assert "Failed to initialize Genie conversation" in str(exc_info.value)
-

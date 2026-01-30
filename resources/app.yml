@@ -25,7 +25,14 @@ resources:
           level: CAN_MANAGE
 
       user_api_scopes:
+        # Existing scopes
         - sql
         - dashboards.genie
         - catalog.tables:read
         - serving.serving-endpoints
+        # Vector Search (direct SDK)
+        - vectorsearch.vector-search-endpoints
+        - vectorsearch.vector-search-indexes
+        # MCP (UC functions and external servers)
+        - mcp.functions
+        - mcp.external

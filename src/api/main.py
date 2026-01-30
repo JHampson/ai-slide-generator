@@ -21,9 +21,11 @@ from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
     genie_router,
+    profile_tools_router,
     profiles_router,
     prompts_router,
     slide_styles_router,
+    tool_library_router,
 )
 from src.api.services.export_job_queue import start_export_worker
 from src.api.services.job_queue import recover_stuck_requests, start_worker
@@ -270,6 +272,8 @@ app.include_router(deck_prompts_router, prefix="/api/settings", tags=["settings"
 app.include_router(genie_router, prefix="/api/settings", tags=["settings"])
 app.include_router(prompts_router, prefix="/api/settings", tags=["settings"])
 app.include_router(slide_styles_router, prefix="/api/settings", tags=["settings"])
+app.include_router(tool_library_router, prefix="/api/settings", tags=["tools"])
+app.include_router(profile_tools_router, prefix="/api/settings", tags=["tools"])
 
 
 @app.get("/api/health")

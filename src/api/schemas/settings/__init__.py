@@ -20,6 +20,17 @@ from src.api.schemas.settings.responses import (
     PromptsConfig,
     ValidationErrorResponse,
 )
+from src.api.schemas.settings.tools import (
+    ProfileToolCreate,
+    ProfileToolResponse,
+    ProfileToolUpdate,
+    ToolLibraryCreate,
+    ToolLibraryResponse,
+    ToolLibraryUpdate,
+    ToolReorderRequest,
+    ToolValidateRequest,
+    ToolValidateResponse,
+)
 
 __all__ = [
     # Requests
@@ -31,6 +42,16 @@ __all__ = [
     "GenieSpaceCreate",
     "GenieSpaceUpdate",
     "PromptsConfigUpdate",
+    # Tool schemas
+    "ToolLibraryCreate",
+    "ToolLibraryUpdate",
+    "ToolLibraryResponse",
+    "ProfileToolCreate",
+    "ProfileToolUpdate",
+    "ProfileToolResponse",
+    "ToolReorderRequest",
+    "ToolValidateRequest",
+    "ToolValidateResponse",
     # Responses
     "ProfileSummary",
     "ProfileDetail",

@@ -1121,8 +1121,8 @@ class ChatService:
             # Use existing Genie conversation or create new one (only if Genie configured)
             if genie_conversation_id:
                 genie_conv_id = genie_conversation_id
-            elif settings.genie:
-                genie_conv_id = initialize_genie_conversation()
+            elif settings.genie and settings.genie.space_id:
+                genie_conv_id = initialize_genie_conversation(settings.genie.space_id)
                 # Save the new Genie conversation ID to database
                 session_manager = get_session_manager()
                 session_manager.set_genie_conversation_id(session_id, genie_conv_id)

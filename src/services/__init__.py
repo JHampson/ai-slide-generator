@@ -6,6 +6,7 @@ from src.services.config_validator import ConfigurationValidator, validate_profi
 from src.services.genie_service import GenieService
 from src.services.profile_service import ProfileService
 from src.services.streaming_callback import StreamingCallbackHandler
+from src.services.tool_service import ToolService
 from src.services.validator import ConfigValidator, ValidationResult
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "ProfileService",
     "SlideGeneratorAgent",
     "StreamingCallbackHandler",
+    "ToolService",
     "ValidationResult",
     "create_agent",
     "validate_profile_configuration",

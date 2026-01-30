@@ -24,7 +24,7 @@ interface ProfileDetailProps {
 export const ProfileDetailView: React.FC<ProfileDetailProps> = ({ 
   profileId, 
   onClose,
-  initialMode = 'view',
+  initialMode = 'edit',
 }) => {
   const [profile, setProfile] = useState<ProfileDetail | null>(null);
   const [loading, setLoading] = useState(true);

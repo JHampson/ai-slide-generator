@@ -1,0 +1,273 @@
+"""
+MCP (Model Context Protocol) server tool implementation.
+
+Creates LangChain tools that connect to external MCP servers through
+the Databricks MCP proxy using Unity Catalog connections.
+"""
+
+import logging
+from typing import Any
+
+from langchain_core.tools import StructuredTool
+from pydantic import Field, create_model
+
+from src.core.databricks_client import get_user_client
+from src.database.models import ToolLibrary
+
+logger = logging.getLogger(__name__)
+
+
+class MCPToolError(Exception):
+    """Raised when MCP tool execution fails."""
+
+    pass
+
+
+def call_mcp_tool(
+    connection_name: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Call a tool on an MCP server via Databricks MCP proxy.
+
+    Args:
+        connection_name: Unity Catalog connection name for the MCP server
+        tool_name: Name of the tool to call
+        arguments: Tool arguments
+
+    Returns:
+        Tool result dict
+
+    Raises:
+        MCPToolError: If tool call fails
+    """
+    try:
+        from databricks_mcp import DatabricksMCPClient
+    except ImportError:
+        raise MCPToolError(
+            "databricks-mcp package not installed. "
+            "Install with: pip install databricks-mcp"
+        )
+
+    logger.info(f"Calling MCP tool: {tool_name} via connection: {connection_name}")
+
+    try:
+        # Get user client for authentication
+        client = get_user_client()
+        host = client.config.host
+
+        # Build the MCP proxy URL
+        # The Databricks MCP proxy endpoint format: /api/2.0/mcp/external/{connection_name}
+        server_url = f"{host}/api/2.0/mcp/external/{connection_name}"
+
+        # Create MCP client with workspace authentication
+        mcp_client = DatabricksMCPClient(
+            server_url=server_url,
+            workspace_client=client,
+        )
+
+        # Call the tool
+        response = mcp_client.call_tool(tool_name, arguments)
+
+        # Parse the response
+        output = {}
+        if hasattr(response, "content") and response.content:
+            # Extract text from content items
+            texts = []
+            for item in response.content:
+                if hasattr(item, "text"):
+                    texts.append(item.text)
+                elif isinstance(item, str):
+                    texts.append(item)
+            output["result"] = "\n".join(texts) if texts else str(response.content)
+        elif hasattr(response, "data"):
+            output["result"] = response.data
+        else:
+            output["result"] = str(response)
+
+        logger.info(f"MCP tool {tool_name} completed successfully")
+        return output
+
+    except MCPToolError:
+        raise
+    except Exception as e:
+        logger.error(f"MCP tool call failed: {e}", exc_info=True)
+        raise MCPToolError(f"MCP tool call failed: {e}") from e
+
+
+def list_mcp_tools(connection_name: str) -> list[dict]:
+    """
+    List available tools from an MCP server via Databricks proxy.
+
+    Args:
+        connection_name: Unity Catalog connection name for the MCP server
+
+    Returns:
+        List of tool definitions
+    """
+    try:
+        from databricks_mcp import DatabricksMCPClient
+    except ImportError:
+        return []
+
+    try:
+        client = get_user_client()
+        host = client.config.host
+        server_url = f"{host}/api/2.0/mcp/external/{connection_name}"
+
+        mcp_client = DatabricksMCPClient(
+            server_url=server_url,
+            workspace_client=client,
+        )
+
+        mcp_tools = mcp_client.list_tools()
+
+        tools = []
+        for tool in mcp_tools:
+            tools.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+            })
+        return tools
+
+    except Exception as e:
+        logger.warning(f"Failed to list MCP tools: {e}")
+        return []
+
+
+def create_mcp_tools(tool_def: ToolLibrary, description: str) -> list[StructuredTool]:
+    """
+    Create LangChain tools from an MCP server via Databricks proxy.
+
+    An MCP server can expose multiple tools, so this returns a list.
+    Uses Unity Catalog connections for secure authentication.
+
+    Args:
+        tool_def: ToolLibrary object with mcp_server config
+        description: Base description for tools
+
+    Returns:
+        List of LangChain StructuredTool instances
+    """
+    config = tool_def.config
+    connection_name = config.get("connection_name")
+    tool_configs = config.get("tools", [])
+
+    if not connection_name:
+        raise ValueError(
+            f"MCP tool {tool_def.name} missing connection_name in config. "
+            "Create a Unity Catalog connection for the external MCP server."
+        )
+
+    tools = []
+
+    # Try to discover tools from MCP server if none configured
+    if not tool_configs:
+        try:
+            discovered = list_mcp_tools(connection_name)
+            if discovered:
+                logger.info(
+                    f"Discovered {len(discovered)} tools from MCP server {tool_def.name}"
+                )
+                tool_configs = discovered
+        except Exception as e:
+            logger.warning(f"Could not discover MCP tools: {e}")
+
+    # If still no tools, create a generic search tool (common for Tavily-like servers)
+    if not tool_configs:
+        tool_configs = [
+            {
+                "name": "search",
+                "description": description or f"Search using {tool_def.name}",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            }
+        ]
+
+    for tool_config in tool_configs:
+        mcp_tool_name = tool_config.get("name", "search")
+        tool_description = tool_config.get("description", "")
+        input_schema = tool_config.get("input_schema", {})
+
+        # Build Pydantic model from input schema
+        fields = {}
+        properties = (
+            input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+        )
+        required = (
+            input_schema.get("required", []) if isinstance(input_schema, dict) else []
+        )
+
+        for param_name, param_spec in properties.items():
+            if not isinstance(param_spec, dict):
+                continue
+
+            param_type = param_spec.get("type", "string")
+            param_desc = param_spec.get("description", f"{param_name} parameter")
+
+            if param_type == "string":
+                py_type = str
+            elif param_type in ("integer", "int"):
+                py_type = int
+            elif param_type in ("number", "float"):
+                py_type = float
+            elif param_type == "boolean":
+                py_type = bool
+            elif param_type in ("object", "dict"):
+                py_type = dict
+            elif param_type == "array":
+                py_type = list
+            else:
+                py_type = str
+
+            if param_name in required:
+                fields[param_name] = (py_type, Field(description=param_desc))
+            else:
+                fields[param_name] = (
+                    py_type,
+                    Field(default=None, description=param_desc),
+                )
+
+        if not fields:
+            # Default to query parameter
+            fields["query"] = (str, Field(description="Query or request"))
+
+        InputSchema = create_model(f"{mcp_tool_name}Input", **fields)
+
+        def _create_wrapper(tool_name: str, conn_name: str):
+            def _wrapper(**kwargs) -> dict[str, Any]:
+                # Remove None values
+                args = {k: v for k, v in kwargs.items() if v is not None}
+                return call_mcp_tool(
+                    connection_name=conn_name,
+                    tool_name=tool_name,
+                    arguments=args,
+                )
+
+            return _wrapper
+
+        # Generate unique tool name
+        # Sanitize connection name for use in tool name
+        safe_conn_name = connection_name.replace("-", "_").replace(".", "_").lower()
+        langchain_tool_name = f"mcp_{safe_conn_name}_{mcp_tool_name}"
+
+        tool = StructuredTool.from_function(
+            func=_create_wrapper(mcp_tool_name, connection_name),
+            name=langchain_tool_name,
+            description=tool_description or f"Call {mcp_tool_name} on {tool_def.name}",
+            args_schema=InputSchema,
+        )
+        tools.append(tool)
+
+    logger.info(f"Created {len(tools)} MCP tools from {tool_def.name}")
+    return tools

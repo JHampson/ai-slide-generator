@@ -100,6 +100,28 @@ fi
 # Create log directory
 mkdir -p logs
 
+# Ensure database tables exist (safe to run multiple times)
+echo -e "${BLUE}🔧 Ensuring database tables exist...${NC}"
+python -c "
+# Import database first (no circular import issues)
+from src.core.database import Base, get_engine, init_db
+# Then import models to register them with Base.metadata
+from src.database.models.ai_infra import ConfigAIInfra
+from src.database.models.genie_space import ConfigGenieSpace
+from src.database.models.profile import ConfigProfile
+from src.database.models.prompts import ConfigPrompts
+from src.database.models.profile_tool import ProfileTool
+from src.database.models.tool_library import ToolLibrary
+from src.database.models.slide_deck_prompt import SlideDeckPromptLibrary
+from src.database.models.slide_style_library import SlideStyleLibrary
+from src.database.models.session import UserSession, SessionMessage, SessionSlideDeck, ChatRequest
+from src.database.models.history import ConfigHistory
+# Now create all tables
+init_db()
+print('Database tables ready')
+"
+echo -e "${GREEN}✅ Database ready${NC}"
+
 # Start backend in background
 echo -e "${BLUE}🔧 Starting backend on port 8000...${NC}"
 nohup uvicorn src.api.main:app --reload --port 8000 > logs/backend.log 2>&1 &

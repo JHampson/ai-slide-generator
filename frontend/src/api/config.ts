@@ -196,6 +196,122 @@ export interface SlideStyleListResponse {
   total: number;
 }
 
+// Tool Library types
+
+export type ToolType = 'genie_space' | 'vector_index' | 'mcp_server' | 'uc_function';
+
+/**
+ * Tool configuration stored in the app-level library.
+ * Tools can be assigned to multiple profiles.
+ */
+export interface ToolLibraryItem {
+  id: number;
+  tool_type: ToolType;
+  name: string;
+  description: string | null;
+  config: Record<string, unknown>;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export interface ToolLibraryCreate {
+  tool_type: ToolType;
+  name: string;
+  description?: string | null;
+  config: Record<string, unknown>;
+}
+
+export interface ToolLibraryUpdate {
+  name?: string;
+  description?: string | null;
+  config?: Record<string, unknown>;
+}
+
+/**
+ * Tool assignment to a profile.
+ * References a tool from the library with profile-specific settings.
+ */
+export interface ProfileTool {
+  id: number;
+  profile_id: number;
+  tool_id: number;
+  is_enabled: boolean;
+  description_override: string | null;
+  priority: number;
+  created_at: string;
+  // Tool details from library
+  tool_name: string;
+  tool_type: ToolType;
+  tool_description: string | null;
+  tool_config: Record<string, unknown>;
+}
+
+export interface ProfileToolCreate {
+  tool_id: number;
+  is_enabled?: boolean;
+  description_override?: string | null;
+  priority?: number;
+}
+
+export interface ProfileToolUpdate {
+  is_enabled?: boolean;
+  description_override?: string | null;
+  priority?: number;
+}
+
+export interface ToolReorderRequest {
+  tool_ids: number[];
+}
+
+export interface ToolValidateRequest {
+  tool_type: ToolType;
+  config: Record<string, unknown>;
+}
+
+export interface ToolValidateResponse {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+// Tool type-specific config interfaces
+
+export interface GenieToolConfig {
+  space_id: string;
+  space_name?: string;
+}
+
+export interface VectorToolConfig {
+  endpoint_name: string;
+  index_name: string;
+  num_results?: number;
+  columns?: string[];
+}
+
+export interface MCPToolConfig {
+  url: string;
+  transport?: 'sse' | 'stdio';
+  api_key_env?: string;
+  tools?: Array<{
+    name: string;
+    description?: string;
+    parameters?: Record<string, string>;
+  }>;
+}
+
+export interface UCFunctionToolConfig {
+  catalog: string;
+  schema: string;
+  function_name: string;
+  parameters?: Record<string, {
+    type: string;
+    description?: string;
+    required?: boolean;
+  }>;
+}
+
 export interface EndpointsList {
   endpoints: string[];
 }
@@ -463,6 +579,89 @@ export const configApi = {
 
   validateGenie: (spaceId: string): Promise<{ success: boolean; message: string; details?: any }> =>
     fetchJson(`${API_BASE}/genie/validate?space_id=${encodeURIComponent(spaceId)}`, {
+      method: 'POST',
+    }),
+
+  // Tool Library (App-Level)
+  
+  listTools: (toolType?: ToolType, includeInactive?: boolean): Promise<ToolLibraryItem[]> => {
+    const params = new URLSearchParams();
+    if (toolType) params.append('tool_type', toolType);
+    if (includeInactive) params.append('include_inactive', 'true');
+    const queryString = params.toString();
+    return fetchJson(`${API_BASE}/tool-library${queryString ? `?${queryString}` : ''}`);
+  },
+  
+  getTool: (toolId: number): Promise<ToolLibraryItem> =>
+    fetchJson(`${API_BASE}/tool-library/${toolId}`),
+  
+  createTool: (data: ToolLibraryCreate): Promise<ToolLibraryItem> =>
+    fetchJson(`${API_BASE}/tool-library`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  updateTool: (toolId: number, data: ToolLibraryUpdate): Promise<ToolLibraryItem> =>
+    fetchJson(`${API_BASE}/tool-library/${toolId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  deleteTool: (toolId: number, hard?: boolean): Promise<void> =>
+    fetchJson(`${API_BASE}/tool-library/${toolId}${hard ? '?hard=true' : ''}`, {
+      method: 'DELETE',
+    }),
+  
+  // Tool Discovery
+  
+  discoverGenieSpaces: (): Promise<AvailableGenieSpaces> =>
+    fetchJson(`${API_BASE}/tool-library/discover/genie`),
+  
+  discoverVectorIndexes: (): Promise<{ indexes: Record<string, { endpoint_name: string; index_name: string; endpoint_status?: string; index_type?: string }> }> =>
+    fetchJson(`${API_BASE}/tool-library/discover/vector`),
+  
+  validateToolConfig: (data: ToolValidateRequest): Promise<ToolValidateResponse> =>
+    fetchJson(`${API_BASE}/tool-library/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  // Profile Tools (Assignment)
+  
+  listProfileTools: (profileId: number): Promise<ProfileTool[]> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools`),
+  
+  addToolToProfile: (profileId: number, data: ProfileToolCreate): Promise<ProfileTool> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  updateProfileTool: (profileId: number, toolId: number, data: ProfileToolUpdate): Promise<ProfileTool> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools/${toolId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  removeToolFromProfile: (profileId: number, toolId: number): Promise<void> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools/${toolId}`, {
+      method: 'DELETE',
+    }),
+  
+  reorderProfileTools: (profileId: number, data: ToolReorderRequest): Promise<ProfileTool[]> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools/reorder`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    }),
+  
+  toggleProfileTool: (profileId: number, toolId: number): Promise<ProfileTool> =>
+    fetchJson(`${API_BASE}/profiles/${profileId}/tools/${toolId}/toggle`, {
       method: 'POST',
     }),
 };

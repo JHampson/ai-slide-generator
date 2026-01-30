@@ -34,6 +34,9 @@ def main():
 
     # Initialize database tables
     print("Initializing database tables...")
+    # Import all models to ensure they're registered with Base.metadata
+    # This must happen before init_db() is called
+    import src.database.models  # noqa: F401
     from src.core.database import init_db
 
     init_db()

@@ -1,9 +1,19 @@
 """
 Genie space configuration API endpoints.
 
-Each profile has exactly one Genie space.
+DEPRECATED: These endpoints are maintained for backward compatibility.
+New code should use the tool-library and profile-tools APIs instead:
+- POST /api/settings/tool-library (create a Genie space tool in the library)
+- POST /api/settings/profiles/{id}/tools (assign tool to profile)
+
+The new multi-tool system supports multiple tool types per profile:
+- genie_space: Databricks Genie spaces
+- vector_index: Vector search indexes
+- mcp_server: MCP protocol servers
+- uc_function: Unity Catalog functions
 """
 import logging
+import warnings
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -18,6 +28,16 @@ from src.services.config_validator import ConfigurationValidator
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/genie", tags=["genie-spaces"])
+
+
+def _log_deprecation_warning(endpoint: str):
+    """Log a deprecation warning for old Genie endpoints."""
+    msg = (
+        f"DEPRECATED: {endpoint} endpoint. "
+        "Use /api/settings/tool-library and /api/settings/profiles/{{id}}/tools instead."
+    )
+    logger.warning(msg)
+    warnings.warn(msg, DeprecationWarning, stacklevel=3)
 
 
 def get_genie_service(db: Session = Depends(get_db)) -> GenieService:
@@ -186,6 +206,8 @@ def get_genie_space(
     """
     Get the Genie space for a profile.
     
+    DEPRECATED: Use GET /api/settings/profiles/{profile_id}/tools instead.
+    
     Each profile has exactly one Genie space.
     
     Args:
@@ -197,6 +219,7 @@ def get_genie_space(
     Raises:
         404: No Genie space found for profile
     """
+    _log_deprecation_warning("GET /genie/{profile_id}")
     try:
         space = service.get_genie_space(profile_id)
         if not space:
@@ -224,6 +247,10 @@ def add_genie_space(
     """
     Add a Genie space to a profile.
     
+    DEPRECATED: Use the following workflow instead:
+    1. POST /api/settings/tool-library (create Genie tool in library)
+    2. POST /api/settings/profiles/{id}/tools (assign to profile)
+    
     Each profile can have exactly one Genie space. If a space already exists,
     this will fail with a 400 error.
     
@@ -237,6 +264,7 @@ def add_genie_space(
     Raises:
         400: Validation failed or profile already has a Genie space
     """
+    _log_deprecation_warning("POST /genie/{profile_id}")
     try:
         # Validate
         validator = ConfigurationValidator(profile_id=None)
@@ -283,6 +311,8 @@ def update_genie_space(
     """
     Update Genie space metadata.
     
+    DEPRECATED: Use PUT /api/settings/profiles/{id}/tools/{tool_id} instead.
+    
     Args:
         space_id: Genie space ID (internal database ID)
         request: Update request
@@ -293,6 +323,7 @@ def update_genie_space(
     Raises:
         404: Space not found
     """
+    _log_deprecation_warning("PUT /genie/space/{space_id}")
     try:
         # TODO: Get actual user from authentication
         user = "system"
@@ -325,12 +356,15 @@ def delete_genie_space(
     """
     Delete a Genie space.
     
+    DEPRECATED: Use DELETE /api/settings/profiles/{id}/tools/{tool_id} instead.
+    
     Args:
         space_id: Genie space ID (internal database ID)
         
     Raises:
         404: Space not found
     """
+    _log_deprecation_warning("DELETE /genie/space/{space_id}")
     try:
         # TODO: Get actual user from authentication
         user = "system"

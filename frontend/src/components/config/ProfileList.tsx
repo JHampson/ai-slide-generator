@@ -310,17 +310,17 @@ export const ProfileList: React.FC<ProfileListProps> = ({ onProfileChange }) => 
                   </td>
                   <td className="px-4 py-3 text-sm">
                     <div className="flex gap-2">
-                      {/* View and Edit Button */}
+                      {/* Configure Button */}
                       <button
                         onClick={() => {
                           setViewingProfileId(profile.id);
-                          setViewingProfileMode('view');
+                          setViewingProfileMode('edit');
                         }}
                         disabled={actionLoading === profile.id}
                         className="px-3 py-1 bg-indigo-500 hover:bg-indigo-600 text-white text-xs rounded transition-colors disabled:bg-gray-300"
-                        title="View and edit configuration"
+                        title="Configure profile settings"
                       >
-                        View and Edit
+                        Configure
                       </button>
 
                       {/* Load Button */}

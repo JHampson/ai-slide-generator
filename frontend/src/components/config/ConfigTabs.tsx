@@ -2,7 +2,7 @@
  * Tabbed configuration editor.
  * 
  * Provides tabbed interface for editing all configuration domains:
- * - Genie Spaces
+ * - Tools (data sources and capabilities)
  * - Deck Prompt (presentation templates)
  * - Slide Style (visual appearance)
  * - AI Infrastructure
@@ -12,12 +12,12 @@
 import React, { useState, useMemo } from 'react';
 import { useConfig } from '../../hooks/useConfig';
 import { AIInfraForm } from './AIInfraForm';
-import { GenieForm } from './GenieForm';
+import { ProfileToolsForm } from './ProfileToolsForm';
 import { DeckPromptSelector } from './DeckPromptSelector';
 import { SlideStyleSelector } from './SlideStyleSelector';
 import { AdvancedSettingsEditor } from './AdvancedSettingsEditor';
 
-type TabId = 'ai_infra' | 'genie' | 'deck_prompt' | 'slide_style' | 'advanced';
+type TabId = 'ai_infra' | 'tools' | 'deck_prompt' | 'slide_style' | 'advanced';
 
 interface Tab {
   id: TabId;
@@ -32,7 +32,7 @@ const isDebugMode = (): boolean => {
 };
 
 const allTabs: Tab[] = [
-  { id: 'genie', label: 'Genie Spaces', icon: '🧞' },
+  { id: 'tools', label: 'Tools', icon: '🔧' },
   { id: 'deck_prompt', label: 'Deck Prompt', icon: '📋' },
   { id: 'slide_style', label: 'Slide Style', icon: '🎨' },
   { id: 'ai_infra', label: 'AI Infrastructure', icon: '🤖' },
@@ -45,7 +45,7 @@ interface ConfigTabsProps {
 }
 
 export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }) => {
-  const [activeTab, setActiveTab] = useState<TabId>('genie');
+  const [activeTab, setActiveTab] = useState<TabId>('tools');
   
   const {
     config,
@@ -119,8 +119,8 @@ export const ConfigTabs: React.FC<ConfigTabsProps> = ({ profileId, profileName }
           />
         )}
 
-        {activeTab === 'genie' && (
-          <GenieForm
+        {activeTab === 'tools' && (
+          <ProfileToolsForm
             profileId={profileId}
             onSave={reload}
             saving={saving}
