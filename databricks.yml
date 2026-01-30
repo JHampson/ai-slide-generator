@@ -1,0 +1,46 @@
+bundle:
+  name: tellr
+
+variables:
+  lakebase_schema:
+    description: PostgreSQL schema name
+    default: app_data
+  lakebase_capacity:
+    description: Lakebase compute capacity
+    default: CU_1
+
+targets:
+  development:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-eyp-tellr.cloud.databricks.com
+
+  production:
+    mode: production
+    workspace:
+      host: https://fevm-eyp-tellr.cloud.databricks.com
+    variables:
+      lakebase_capacity: CU_2  # More capacity for production
+
+sync:
+  include:
+    - app.yaml
+    - src/**
+    - scripts/app_startup.py
+    - frontend/dist/**
+    - requirements.txt
+    - config/seed_profiles.yaml
+  exclude:
+    - "**/__pycache__"
+    - "*.pyc"
+    - frontend/node_modules/**
+    - frontend/src/**
+    - tests/**
+    - docs/**
+    - packages/**
+    - .venv/**
+    - "*.log"
+
+include:
+  - resources/*.yml

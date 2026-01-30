@@ -8,21 +8,15 @@ import asyncio
 import logging
 import os
 from contextlib import ExitStack, asynccontextmanager
-from pathlib import Path
 from importlib import resources
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.api.routes import chat, slides, export, sessions, verification, version
-from src.core.databricks_client import create_user_client, set_user_client
-from src.core.database import (
-    is_lakebase_environment,
-    start_token_refresh,
-    stop_token_refresh,
-)
+from src.api.routes import chat, export, sessions, slides, verification, version
 from src.api.routes.settings import (
     ai_infra_router,
     deck_prompts_router,
@@ -31,8 +25,14 @@ from src.api.routes.settings import (
     prompts_router,
     slide_styles_router,
 )
-from src.api.services.job_queue import recover_stuck_requests, start_worker
 from src.api.services.export_job_queue import start_export_worker
+from src.api.services.job_queue import recover_stuck_requests, start_worker
+from src.core.database import (
+    is_lakebase_environment,
+    start_token_refresh,
+    stop_token_refresh,
+)
+from src.core.databricks_client import create_user_client, set_user_client
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +64,14 @@ async def lifespan(app: FastAPI):
             raise
 
     if IS_PRODUCTION:
-        logger.info("Production mode: serving frontend from package assets")
+        logger.info("Production mode: serving frontend assets")
         frontend_result = _resolve_frontend_dist()
         if frontend_result:
-            _frontend_assets_stack, frontend_dist = frontend_result
+            stack, frontend_dist = frontend_result
+            _frontend_assets_stack = stack  # May be None for source-based deployment
             _mount_frontend(app, frontend_dist)
         else:
-            logger.warning("Frontend assets not found in package")
+            logger.warning("Frontend assets not found (checked source path and package)")
 
     # Start the job queue worker for async chat processing
     _worker_task = await start_worker()
@@ -127,19 +128,37 @@ app = FastAPI(
 )
 
 
-def _resolve_frontend_dist() -> tuple[ExitStack, Path] | None:
-    """Resolve frontend assets bundled in the app package."""
+def _resolve_frontend_dist() -> tuple[ExitStack | None, Path] | None:
+    """Resolve frontend assets for production deployment.
+
+    Checks two locations in order:
+    1. Source path (DAB deployment): frontend/dist relative to project root
+    2. Package assets (PyPI deployment): databricks_tellr_app package
+
+    Returns:
+        Tuple of (ExitStack or None, Path) if found, None otherwise.
+        ExitStack is only needed for package assets; source path returns None for stack.
+    """
+    # Option 1: Source-based deployment (DAB)
+    # frontend/dist is relative to src/api/main.py -> ../../frontend/dist
+    source_root = Path(__file__).parent.parent.parent
+    frontend_dist = source_root / "frontend" / "dist"
+    if frontend_dist.is_dir():
+        logger.info(f"Found frontend at source path: {frontend_dist}")
+        return None, frontend_dist
+
+    # Option 2: Package-based deployment (PyPI)
     try:
         assets_root = resources.files("databricks_tellr_app") / "_assets" / "frontend"
+        if assets_root.is_dir():
+            stack = ExitStack()
+            resolved_path = stack.enter_context(resources.as_file(assets_root))
+            logger.info(f"Found frontend in package assets: {resolved_path}")
+            return stack, Path(resolved_path)
     except ModuleNotFoundError:
-        return None
+        pass
 
-    if not assets_root.is_dir():
-        return None
-
-    stack = ExitStack()
-    resolved_path = stack.enter_context(resources.as_file(assets_root))
-    return stack, Path(resolved_path)
+    return None
 
 
 def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
@@ -168,11 +187,10 @@ def _mount_frontend(app: FastAPI, frontend_dist: Path) -> None:
 
         index_path = frontend_dist / "index.html"
         if not index_path.exists():
-            raise HTTPException(
-                status_code=500, detail="Frontend not bundled in package"
-            )
+            raise HTTPException(status_code=500, detail="Frontend not bundled in package")
 
         return FileResponse(str(index_path))
+
 
 # Configure CORS only for development
 if not IS_PRODUCTION:
@@ -220,9 +238,7 @@ async def user_auth_middleware(request: Request, call_next):
             },
         )
         if is_sp_token:
-            logger.warning(
-                "OBO auth: token appears to be service principal ID, not user token!"
-            )
+            logger.warning("OBO auth: token appears to be service principal ID, not user token!")
         try:
             user_client = create_user_client(token)
             set_user_client(user_client)
@@ -275,6 +291,7 @@ async def get_current_user():
     """
     try:
         from src.core.databricks_client import get_user_client
+
         client = get_user_client()
         user = client.current_user.me()
         return {
@@ -302,4 +319,3 @@ if not IS_PRODUCTION:
             "status": "operational",
             "message": "Frontend should be running on http://localhost:3000",
         }
-

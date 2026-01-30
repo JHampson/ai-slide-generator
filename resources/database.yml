@@ -1,0 +1,7 @@
+resources:
+  database_instances:
+    tellr_db:
+      name: tellr-${bundle.target}-db
+      capacity: ${var.lakebase_capacity}
+      # Lakebase database instance - manages storage and compute resources
+      # and provides the PostgreSQL endpoint that the app connects to

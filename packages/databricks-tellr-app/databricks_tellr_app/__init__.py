@@ -1,2 +1,0 @@
-"""Tellr application package."""
-

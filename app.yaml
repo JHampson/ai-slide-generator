@@ -1,35 +1,21 @@
-# Databricks App Configuration
-# This file defines how the AI Slide Generator runs in Databricks Apps
+# Databricks App runtime configuration
+# This file is read by the Databricks Apps runtime to configure the app execution
 
-# App metadata
-name: "ai-slide-generator"
-description: "AI-powered slide deck generator using LLMs and Genie"
-
-# Startup command - install dependencies and run app
-# Multiple workers enabled for multi-user concurrency
 command:
-  - "sh"
-  - "-c"
-  - |
-    pip install -r requirements.txt && \
-    python -m databricks_tellr_app.run
+  - sh
+  - -c
+  - pip install -r requirements.txt && PYTHONPATH=. python scripts/app_startup.py
 
-# Environment variables
 env:
   - name: ENVIRONMENT
-    value: "production"
+    value: production
   - name: DATABRICKS_HOST
     valueFrom: "system.databricks_host"  # Injected by Databricks
-  - name: DATABRICKS_TOKEN
-    valueFrom: "system.databricks_token"  # App service principal token
   - name: LOG_LEVEL
-    value: "INFO"
+    value: INFO
   - name: MLFLOW_TRACKING_URI
-    value: "databricks"
-  # Lakebase schema configuration
-  # PGHOST and PGUSER are auto-set when database resource is attached
+    value: databricks
+  # PGHOST and PGUSER are auto-injected by Databricks Apps from the attached database resource
+  # OAuth token authentication is handled automatically via WorkspaceClient
   - name: LAKEBASE_SCHEMA
-    value: "app_data"
-
-# Note: compute_size is set programmatically during deployment via the Databricks SDK
-# Valid values configured in deployment.yaml: MEDIUM, LARGE, LIQUID
+    value: app_data

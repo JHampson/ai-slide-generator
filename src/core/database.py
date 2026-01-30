@@ -10,16 +10,16 @@ event to inject fresh tokens for new connections.
 
 See: https://apps-cookbook.dev/docs/fastapi/getting_started/lakebase_connection/
 """
+
 import asyncio
 import logging
 import os
 import time
-import uuid
 from contextlib import contextmanager
 from typing import Generator, Optional
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event, URL
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ TOKEN_REFRESH_INTERVAL_SECONDS = 50 * 60
 
 def is_lakebase_environment() -> bool:
     """Check if running in a Lakebase environment (Databricks Apps).
-    
+
     Returns:
         True if PGHOST and PGUSER are set (auto-injected by Databricks Apps)
     """
@@ -51,52 +51,43 @@ def is_lakebase_environment() -> bool:
 
 def _generate_lakebase_token() -> str:
     """Generate a fresh OAuth token for Lakebase authentication.
-    
-    Uses the system client (service principal) for database authentication.
-    User tokens are not valid for Lakebase access.
-    
+
+    Uses the system client (service principal) OAuth token for database authentication.
+    This follows the official Databricks pattern where the service principal's OAuth
+    token is automatically valid for attached database resources.
+
+    See: https://github.com/databricks-solutions/databricks-dab-examples/blob/main/knowledge-base/app-react-lakebase/app/database.py
+
     Returns:
         OAuth token string to use as PostgreSQL password
-        
+
     Raises:
         Exception: If token generation fails
     """
     from src.core.databricks_client import get_system_client
 
     ws = get_system_client()
-    instance_name = os.getenv("LAKEBASE_INSTANCE")
 
-    if instance_name:
-        # Generate credential for specific instance
-        cred = ws.database.generate_database_credential(
-            request_id=str(uuid.uuid4()),
-            instance_names=[instance_name],
-        )
-        return cred.token
-    else:
-        # Fallback: use workspace authentication token
-        # This works when the app has database resource attached
-        token = ws.config.authenticate()
-        if hasattr(token, "token"):
-            return token.token
-        return str(token)
+    # Use OAuth token directly - the official Databricks pattern
+    # The service principal's token is valid for any attached database resource
+    return ws.config.oauth_token().access_token
 
 
 def _get_lakebase_token() -> str:
     """Get the current OAuth token for Lakebase authentication.
-    
+
     Returns the cached token if available, otherwise generates a new one.
     For production use, the token is refreshed by the background task.
-    
+
     Returns:
         OAuth token string
     """
     global _postgres_token, _last_token_refresh
-    
+
     # If we have a cached token, return it
     if _postgres_token is not None:
         return _postgres_token
-    
+
     # Generate initial token
     try:
         _postgres_token = _generate_lakebase_token()
@@ -110,7 +101,7 @@ def _get_lakebase_token() -> str:
 
 async def _refresh_token_background() -> None:
     """Background task to refresh Lakebase OAuth tokens every 50 minutes.
-    
+
     Tokens expire after 1 hour, so we refresh at 50 minutes to ensure
     continuous connectivity with a 10-minute buffer.
     """
@@ -135,7 +126,7 @@ async def _refresh_token_background() -> None:
 
 async def start_token_refresh() -> None:
     """Start the background token refresh task.
-    
+
     Should be called during FastAPI lifespan startup when running
     in a Lakebase environment.
     """
@@ -162,7 +153,7 @@ async def start_token_refresh() -> None:
 
 async def stop_token_refresh() -> None:
     """Stop the background token refresh task.
-    
+
     Should be called during FastAPI lifespan shutdown.
     """
     global _token_refresh_task
@@ -247,11 +238,12 @@ def _create_engine():
 
     # For Lakebase: register event listener to inject fresh tokens
     if is_lakebase_environment():
+
         @event.listens_for(engine, "do_connect")
         def provide_token(dialect, conn_rec, cargs, cparams):
             """Inject current OAuth token for new database connections."""
             global _postgres_token
-            
+
             # Get token (generates if not yet available)
             token = _postgres_token if _postgres_token else _get_lakebase_token()
             cparams["password"] = token
@@ -326,27 +318,28 @@ def get_db_session() -> Generator[Session, None, None]:
 
 def init_db():
     """Create all tables in the database.
-    
+
     For Lakebase deployments, ensures the schema is set correctly before
     creating tables. The schema is read from LAKEBASE_SCHEMA env var.
     """
     engine = get_engine()
     schema = os.getenv("LAKEBASE_SCHEMA")
-    
+
     if schema:
         # For Lakebase: set schema on all tables that don't have one
         # This ensures CREATE TABLE uses the correct schema
         logger.info(f"Setting schema '{schema}' for table creation")
-        
+
         # Execute SET search_path before creating tables
         from sqlalchemy import text
+
         with engine.connect() as conn:
             conn.execute(text(f'SET search_path TO "{schema}"'))
             conn.commit()
-        
+
         # Also set schema on metadata for table creation
         for table in Base.metadata.tables.values():
             if table.schema is None:
                 table.schema = schema
-    
+
     Base.metadata.create_all(bind=engine)
