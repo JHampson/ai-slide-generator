@@ -75,7 +75,11 @@ export const ToolLibraryList: React.FC<ToolLibraryListProps> = ({
         </thead>
         <tbody className="bg-white divide-y divide-gray-200">
           {tools.map((tool) => (
-            <tr key={tool.id} className="hover:bg-gray-50">
+            <tr 
+              key={tool.id} 
+              className="hover:bg-gray-50 cursor-pointer"
+              onClick={() => onEdit(tool)}
+            >
               <td className="px-6 py-4 whitespace-nowrap">
                 <div className="flex items-center">
                   <span className="text-lg mr-2">{TOOL_TYPE_ICONS[tool.tool_type]}</span>
@@ -112,14 +116,14 @@ export const ToolLibraryList: React.FC<ToolLibraryListProps> = ({
               </td>
               <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                 <button
-                  onClick={() => onEdit(tool)}
-                  className="text-blue-600 hover:text-blue-900 mr-4"
+                  onClick={(e) => { e.stopPropagation(); onEdit(tool); }}
+                  className="text-blue-600 hover:text-blue-900 hover:underline cursor-pointer mr-4"
                 >
                   Edit
                 </button>
                 <button
-                  onClick={() => onDelete(tool)}
-                  className="text-red-600 hover:text-red-900"
+                  onClick={(e) => { e.stopPropagation(); onDelete(tool); }}
+                  className="text-red-600 hover:text-red-900 hover:underline cursor-pointer"
                 >
                   Delete
                 </button>

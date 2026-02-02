@@ -57,3 +57,4 @@ playwright==1.48.0
 
 # Note: Development dependencies are in pyproject.toml [project.optional-dependencies.dev]
 # Install with: uv sync --all-extras
+nest-asyncio>=1.5.0

@@ -33,5 +33,5 @@ resources:
         # Vector Search (direct SDK)
         - vectorsearch.vector-search-endpoints
         - vectorsearch.vector-search-indexes
-        # Note: MCP scopes (mcp.functions, mcp.external) may need to be added
-        # when available in workspace - currently using existing auth
+        # Unity Catalog connections (for MCP external)
+        - catalog.connections

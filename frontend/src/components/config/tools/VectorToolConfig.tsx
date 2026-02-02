@@ -30,6 +30,7 @@ export const VectorToolConfig: React.FC<VectorToolConfigProps> = ({
   const endpointName = (config.endpoint_name as string) || '';
   const indexName = (config.index_name as string) || '';
   const numResults = (config.num_results as number) || 5;
+  const columns = (config.columns as string) || '';
 
   const loadIndexes = async () => {
     if (availableIndexes) return;
@@ -137,6 +138,24 @@ export const VectorToolConfig: React.FC<VectorToolConfigProps> = ({
         />
         <p className="mt-1 text-xs text-gray-500">
           Default number of search results to return (1-20).
+        </p>
+      </div>
+
+      {/* Columns to Return */}
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Columns to Return <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="text"
+          value={columns}
+          onChange={(e) => handleFieldChange('columns', e.target.value)}
+          placeholder="text_content, title, url"
+          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+        />
+        <p className="mt-1 text-xs text-gray-500">
+          Comma-separated list of column names to return from search results.
+          Check your index schema for available columns.
         </p>
       </div>
 

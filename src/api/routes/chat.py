@@ -358,3 +358,73 @@ async def poll_chat(
         "result": chat_request.get("result") if chat_request["status"] == "completed" else None,
         "error": chat_request.get("error_message") if chat_request["status"] == "error" else None,
     }
+
+
+@router.get("/debug/tools")
+async def debug_tools():
+    """Debug endpoint to list currently configured tools.
+    
+    Returns the tools from the current settings and what would be created.
+    """
+    from src.core.settings_db import get_settings
+    from src.database.models import ToolType
+    
+    settings = get_settings()
+    
+    tools_info = []
+    for tool_setting in settings.tools:
+        tool_info = {
+            "id": tool_setting.id,
+            "name": tool_setting.name,
+            "tool_type": tool_setting.tool_type,
+            "is_enabled": tool_setting.is_enabled,
+            "description": tool_setting.description,
+            "description_override": getattr(tool_setting, "description_override", ""),
+            "config": tool_setting.config,
+            "priority": getattr(tool_setting, "priority", 0),
+        }
+        
+        # Try to create the tool and capture any errors
+        try:
+            if tool_setting.tool_type == ToolType.VECTOR_INDEX.value:
+                from src.services.tools.vector_tool import create_vector_tool
+                tool_def = type("ToolDef", (), {
+                    "name": tool_setting.name,
+                    "description": tool_setting.description,
+                    "config": tool_setting.config,
+                })()
+                desc = tool_setting.description_override or tool_setting.description
+                created_tool = create_vector_tool(tool_def, desc)
+                tool_info["creation_status"] = "success"
+                tool_info["langchain_tool_name"] = created_tool.name
+            elif tool_setting.tool_type == ToolType.UC_FUNCTION.value:
+                from src.services.tools.uc_function_tool import create_uc_function_tool
+                tool_def = type("ToolDef", (), {
+                    "name": tool_setting.name,
+                    "description": tool_setting.description,
+                    "config": tool_setting.config,
+                })()
+                desc = tool_setting.description_override or tool_setting.description
+                created_tool = create_uc_function_tool(tool_def, desc)
+                tool_info["creation_status"] = "success"
+                tool_info["langchain_tool_name"] = created_tool.name
+            elif tool_setting.tool_type == ToolType.MCP_SERVER.value:
+                tool_info["creation_status"] = "skipped (MCP requires async)"
+            elif tool_setting.tool_type == ToolType.GENIE_SPACE.value:
+                tool_info["creation_status"] = "skipped (Genie requires session)"
+            else:
+                tool_info["creation_status"] = f"unknown type: {tool_setting.tool_type}"
+        except Exception as e:
+            tool_info["creation_status"] = f"error: {str(e)}"
+        
+        tools_info.append(tool_info)
+    
+    return {
+        "profile_id": settings.profile_id,
+        "profile_name": settings.profile_name,
+        "tools_count": len(settings.tools),
+        "tools": tools_info,
+        "legacy_genie": {
+            "space_id": settings.genie.space_id if settings.genie else None,
+        } if settings.genie else None,
+    }

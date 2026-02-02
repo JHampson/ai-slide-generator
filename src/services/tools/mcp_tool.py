@@ -5,6 +5,7 @@ Creates LangChain tools that connect to external MCP servers through
 the Databricks MCP proxy using Unity Catalog connections.
 """
 
+import concurrent.futures
 import logging
 from typing import Any
 
@@ -21,6 +22,106 @@ class MCPToolError(Exception):
     """Raised when MCP tool execution fails."""
 
     pass
+
+
+def _call_mcp_in_clean_thread(
+    server_url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    host: str,
+    token: str,
+) -> dict[str, Any]:
+    """
+    Call MCP tool in a completely clean thread with no event loop.
+    
+    DatabricksMCPClient uses asyncio.run() internally, which requires
+    no existing event loop. Running in a thread ensures isolation.
+    """
+    try:
+        from databricks_mcp import DatabricksMCPClient
+        from databricks.sdk import WorkspaceClient
+    except ImportError:
+        raise MCPToolError(
+            "databricks-mcp package not installed. "
+            "Install with: pip install databricks-mcp"
+        )
+
+    logger.info(f"Calling MCP tool: {tool_name} at {server_url}")
+
+    try:
+        # Create a fresh workspace client in this thread
+        # Use auth_type='pat' to prevent SDK from also using OAuth env vars
+        ws_client = WorkspaceClient(host=host, token=token, auth_type='pat')
+        
+        # Create MCP client
+        mcp_client = DatabricksMCPClient(
+            server_url=server_url,
+            workspace_client=ws_client,
+        )
+
+        # Call the tool - this uses asyncio.run() internally
+        response = mcp_client.call_tool(tool_name, arguments)
+
+        # Parse the response
+        output = {}
+        if hasattr(response, "content") and response.content:
+            texts = []
+            for item in response.content:
+                if hasattr(item, "text"):
+                    texts.append(item.text)
+                elif isinstance(item, str):
+                    texts.append(item)
+            output["result"] = "\n".join(texts) if texts else str(response.content)
+        elif hasattr(response, "data"):
+            output["result"] = response.data
+        else:
+            output["result"] = str(response)
+
+        logger.info(f"MCP tool {tool_name} completed successfully")
+        return output
+
+    except Exception as e:
+        logger.error(f"MCP tool call failed: {e}", exc_info=True)
+        raise MCPToolError(f"MCP tool call failed: {e}") from e
+
+
+def _list_mcp_in_clean_thread(
+    server_url: str,
+    host: str,
+    token: str,
+) -> list[dict]:
+    """
+    List MCP tools in a clean thread with no event loop.
+    """
+    try:
+        from databricks_mcp import DatabricksMCPClient
+        from databricks.sdk import WorkspaceClient
+    except ImportError:
+        return []
+
+    try:
+        # Use auth_type='pat' to prevent SDK from also using OAuth env vars
+        ws_client = WorkspaceClient(host=host, token=token, auth_type='pat')
+        
+        mcp_client = DatabricksMCPClient(
+            server_url=server_url,
+            workspace_client=ws_client,
+        )
+
+        mcp_tools = mcp_client.list_tools()
+
+        tools = []
+        for tool in mcp_tools:
+            tools.append({
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
+            })
+        return tools
+
+    except Exception as e:
+        logger.warning(f"Failed to list MCP tools: {e}")
+        return []
 
 
 def call_mcp_tool(
@@ -42,55 +143,30 @@ def call_mcp_tool(
     Raises:
         MCPToolError: If tool call fails
     """
-    try:
-        from databricks_mcp import DatabricksMCPClient
-    except ImportError:
-        raise MCPToolError(
-            "databricks-mcp package not installed. "
-            "Install with: pip install databricks-mcp"
-        )
-
     logger.info(f"Calling MCP tool: {tool_name} via connection: {connection_name}")
 
     try:
         # Get user client for authentication
         client = get_user_client()
         host = client.config.host
+        token = client.config.token
 
         # Build the MCP proxy URL
-        # The Databricks MCP proxy endpoint format: /api/2.0/mcp/external/{connection_name}
         server_url = f"{host}/api/2.0/mcp/external/{connection_name}"
 
-        # Create MCP client with workspace authentication
-        mcp_client = DatabricksMCPClient(
-            server_url=server_url,
-            workspace_client=client,
-        )
-
-        # Call the tool
-        response = mcp_client.call_tool(tool_name, arguments)
-
-        # Parse the response
-        output = {}
-        if hasattr(response, "content") and response.content:
-            # Extract text from content items
-            texts = []
-            for item in response.content:
-                if hasattr(item, "text"):
-                    texts.append(item.text)
-                elif isinstance(item, str):
-                    texts.append(item)
-            output["result"] = "\n".join(texts) if texts else str(response.content)
-        elif hasattr(response, "data"):
-            output["result"] = response.data
-        else:
-            output["result"] = str(response)
-
-        logger.info(f"MCP tool {tool_name} completed successfully")
-        return output
+        # Run in a completely separate thread with no event loop
+        # Use ProcessPoolExecutor-like isolation via ThreadPoolExecutor
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                _call_mcp_in_clean_thread,
+                server_url, tool_name, arguments, host, token
+            )
+            return future.result(timeout=120)
 
     except MCPToolError:
         raise
+    except concurrent.futures.TimeoutError:
+        raise MCPToolError("MCP tool call timed out after 120 seconds")
     except Exception as e:
         logger.error(f"MCP tool call failed: {e}", exc_info=True)
         raise MCPToolError(f"MCP tool call failed: {e}") from e
@@ -107,30 +183,17 @@ def list_mcp_tools(connection_name: str) -> list[dict]:
         List of tool definitions
     """
     try:
-        from databricks_mcp import DatabricksMCPClient
-    except ImportError:
-        return []
-
-    try:
         client = get_user_client()
         host = client.config.host
+        token = client.config.token
         server_url = f"{host}/api/2.0/mcp/external/{connection_name}"
 
-        mcp_client = DatabricksMCPClient(
-            server_url=server_url,
-            workspace_client=client,
-        )
-
-        mcp_tools = mcp_client.list_tools()
-
-        tools = []
-        for tool in mcp_tools:
-            tools.append({
-                "name": tool.name,
-                "description": tool.description or "",
-                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-            })
-        return tools
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                _list_mcp_in_clean_thread,
+                server_url, host, token
+            )
+            return future.result(timeout=60)
 
     except Exception as e:
         logger.warning(f"Failed to list MCP tools: {e}")
