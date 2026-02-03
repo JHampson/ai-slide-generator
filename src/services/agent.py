@@ -322,6 +322,9 @@ class SlideGeneratorAgent:
         if session is None:
             raise ToolExecutionError(f"Session not found: {session_id}")
 
+        # Refresh settings to pick up any tool configuration changes
+        self.settings = get_settings()
+
         # Check for new multi-tool system first
         if self.settings.tools:
             # Use new tool factory with session's Genie conversations
