@@ -5,6 +5,7 @@ Creates LangChain tools for querying Databricks Vector Search indexes
 using the native VectorSearchClient for direct integration.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -131,10 +132,11 @@ def search_vector_index(
             extra={"result_count": len(formatted_results)},
         )
 
-        return {
+        # Return as JSON string for LangChain compatibility
+        return json.dumps({
             "results": formatted_results,
             "count": len(formatted_results),
-        }
+        })
 
     except VectorSearchError:
         raise

@@ -2,9 +2,10 @@
 Unity Catalog function tool implementation.
 
 Creates LangChain tools for executing Unity Catalog SQL functions
-using the Databricks UCFunctionToolkit for native integration.
+using SQL Statement Execution API for broad compatibility.
 """
 
+import json
 import logging
 from typing import Any
 
@@ -23,6 +24,37 @@ class UCFunctionError(Exception):
     pass
 
 
+def format_sql_arg(value: Any) -> str:
+    """
+    Format a Python value as a SQL literal for use in function calls.
+    
+    Args:
+        value: Python value to format
+        
+    Returns:
+        SQL literal string
+    """
+    if value is None:
+        return "NULL"
+    elif isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    elif isinstance(value, (int, float)):
+        return str(value)
+    elif isinstance(value, str):
+        # Escape single quotes by doubling them
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    elif isinstance(value, dict):
+        # JSON objects as string literals
+        return f"'{json.dumps(value)}'"
+    elif isinstance(value, list):
+        # Arrays as string literals
+        return f"'{json.dumps(value)}'"
+    else:
+        # Fallback: convert to string
+        return f"'{str(value)}'"
+
+
 class UCFunctionInput(BaseModel):
     """Default input schema for UC function tool."""
 
@@ -35,13 +67,18 @@ class UCFunctionInput(BaseModel):
 def execute_uc_function(
     full_name: str,
     arguments: dict[str, Any] = None,
+    warehouse_id: str = None,
 ) -> dict[str, Any]:
     """
-    Execute a Unity Catalog SQL function using UCFunctionToolkit.
+    Execute a Unity Catalog SQL function via SQL Statement Execution API.
+
+    This method uses the SQL API instead of gRPC Function Serving, which
+    provides broader compatibility with OAuth scopes.
 
     Args:
         full_name: Full function name (catalog.schema.function_name)
-        arguments: Function arguments
+        arguments: Function arguments as key-value pairs
+        warehouse_id: Optional SQL warehouse ID (uses serverless if not provided)
 
     Returns:
         Dict with 'result' containing function output
@@ -49,49 +86,69 @@ def execute_uc_function(
     Raises:
         UCFunctionError: If function execution fails
     """
+    from databricks.sdk.service.sql import StatementState
+
     logger.info(
-        "Executing UC function",
+        "Executing UC function via SQL",
         extra={"function": full_name, "arguments": arguments},
     )
 
     try:
-        from unitycatalog.ai.core.databricks import DatabricksFunctionClient
-    except ImportError:
-        raise UCFunctionError(
-            "unitycatalog-ai package not installed. "
-            "Install with: pip install unitycatalog-ai"
-        )
-
-    try:
         # Get user client for on-behalf-of execution
         client = get_user_client()
-
-        # Create UC function client with user credentials
-        uc_client = DatabricksFunctionClient(client=client)
-
-        # Execute the function
         args = arguments or {}
-        logger.info(f"Executing UC function {full_name} with args: {args}")
 
-        result = uc_client.execute_function(full_name, args)
+        # Build SQL to call the function
+        if args:
+            # Format each argument as a SQL literal
+            arg_values = ", ".join(format_sql_arg(v) for v in args.values())
+            sql = f"SELECT {full_name}({arg_values})"
+        else:
+            sql = f"SELECT {full_name}()"
 
-        # Check for errors
-        if hasattr(result, "error") and result.error:
-            logger.error(
-                f"UC function execution error",
-                extra={"function": full_name, "error": result.error},
-            )
-            raise UCFunctionError(f"Function execution failed: {result.error}")
+        logger.info(f"Executing SQL: {sql}")
 
-        # Extract result value
-        result_value = result.value if hasattr(result, "value") else result
-
-        logger.info(
-            "UC function executed successfully",
-            extra={"function": full_name, "has_result": result_value is not None},
+        # Execute via Statement Execution API
+        # If no warehouse_id provided, Databricks will use serverless compute
+        response = client.statement_execution.execute_statement(
+            warehouse_id=warehouse_id,
+            statement=sql,
+            wait_timeout="30s",
         )
 
-        return {"result": result_value, "function": full_name}
+        # Check execution status
+        if response.status.state == StatementState.SUCCEEDED:
+            # Extract result from first row, first column
+            result_value = None
+            if response.result and response.result.data_array:
+                result_value = response.result.data_array[0][0]
+
+            logger.info(
+                "UC function executed successfully",
+                extra={"function": full_name, "has_result": result_value is not None},
+            )
+
+            # Return as string for LangChain compatibility
+            # If result is already a string (e.g. JSON), return as-is
+            if isinstance(result_value, str):
+                return result_value
+            else:
+                return json.dumps({"result": result_value, "function": full_name})
+
+        elif response.status.state == StatementState.FAILED:
+            error_msg = response.status.error.message if response.status.error else "Unknown error"
+            logger.error(
+                "UC function execution failed",
+                extra={"function": full_name, "error": error_msg},
+            )
+            raise UCFunctionError(f"Function execution failed: {error_msg}")
+
+        else:
+            # Handle other states (PENDING, RUNNING, CANCELED, CLOSED)
+            raise UCFunctionError(
+                f"Unexpected execution state: {response.status.state}. "
+                "Function may have timed out or been canceled."
+            )
 
     except UCFunctionError:
         raise
@@ -104,8 +161,8 @@ def create_uc_function_tool(tool_def: ToolLibrary, description: str) -> Structur
     """
     Create a LangChain StructuredTool for a UC function.
 
-    Uses the Databricks UCFunctionToolkit for native integration with
-    Unity Catalog functions, executing with the user's permissions.
+    Uses SQL Statement Execution API for executing Unity Catalog functions
+    with the user's permissions via OAuth on-behalf-of flow.
 
     Args:
         tool_def: ToolLibrary object with uc_function config
@@ -119,6 +176,7 @@ def create_uc_function_tool(tool_def: ToolLibrary, description: str) -> Structur
     schema = config.get("schema")
     function_name = config.get("function_name")
     parameters = config.get("parameters", {})  # Optional parameter definitions
+    warehouse_id = config.get("warehouse_id")  # Optional: uses serverless if not set
 
     if not all([catalog, schema, function_name]):
         raise ValueError(
@@ -173,6 +231,7 @@ def create_uc_function_tool(tool_def: ToolLibrary, description: str) -> Structur
                         return execute_uc_function(
                             full_name=full_name,
                             arguments=kwargs,
+                            warehouse_id=warehouse_id,
                         )
 
                     tool_name = f"call_{tool_def.name.lower().replace(' ', '_').replace('-', '_')}"
@@ -226,6 +285,7 @@ def create_uc_function_tool(tool_def: ToolLibrary, description: str) -> Structur
             return execute_uc_function(
                 full_name=full_name,
                 arguments=kwargs,
+                warehouse_id=warehouse_id,
             )
 
     else:
@@ -236,6 +296,7 @@ def create_uc_function_tool(tool_def: ToolLibrary, description: str) -> Structur
             return execute_uc_function(
                 full_name=full_name,
                 arguments=arguments or {},
+                warehouse_id=warehouse_id,
             )
 
     # Generate unique tool name

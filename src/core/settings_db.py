@@ -8,7 +8,6 @@ settings API endpoints.
 
 import logging
 import os
-from functools import lru_cache
 from typing import Any, Optional
 
 from pydantic import Field, field_validator
@@ -354,16 +353,15 @@ def load_settings_from_database(profile_id: Optional[int] = None) -> AppSettings
         raise
 
 
-@lru_cache(maxsize=1)
 def get_settings() -> AppSettings:
     """
-    Get the application settings singleton (database-backed).
+    Get the application settings (database-backed).
 
-    This function is cached, so subsequent calls return the same instance.
-    Use reload_settings() to force a reload.
+    Settings are loaded fresh from the database on each call to ensure
+    changes to profiles and tools are immediately reflected.
 
     Returns:
-        Cached AppSettings instance from database
+        AppSettings instance from database
 
     Raises:
         ValueError: If configuration cannot be loaded
@@ -373,40 +371,24 @@ def get_settings() -> AppSettings:
 
 def reload_settings(profile_id: Optional[int] = None) -> AppSettings:
     """
-    Reload settings from database.
-
-    Clears the cache and loads fresh settings from the specified profile
-    or the default profile.
+    Load settings for a specific profile.
 
     Args:
         profile_id: Profile ID to load, or None for default
 
     Returns:
-        New AppSettings instance
+        AppSettings instance for the specified profile
     """
-    logger.info("Reloading settings from database", extra={"profile_id": profile_id})
+    logger.info("Loading settings from database", extra={"profile_id": profile_id})
 
-    # Log cache state before clearing
-    cache_info_before = get_settings.cache_info()
-    logger.info(f"Cache info BEFORE clear: {cache_info_before}")
-
-    # Store the active profile ID globally BEFORE clearing cache
-    # This ensures get_settings() knows which profile to load
+    # Store the active profile ID globally
     if profile_id is not None:
         global _active_profile_id
         _active_profile_id = profile_id
         logger.info(f"Set active profile ID to {profile_id}")
 
-    # Clear the cache
-    get_settings.cache_clear()
-    cache_info_after_clear = get_settings.cache_info()
-    logger.info(f"Cache info AFTER clear: {cache_info_after_clear}")
-
-    # Force immediate cache repopulation by calling get_settings()
-    # This ensures the cache contains the correct profile
+    # Load fresh settings
     settings = get_settings()
-    cache_info_after_reload = get_settings.cache_info()
-    logger.info(f"Cache info AFTER reload: {cache_info_after_reload}")
 
     logger.info(
         "Settings reloaded successfully",
