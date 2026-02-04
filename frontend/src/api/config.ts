@@ -198,7 +198,7 @@ export interface SlideStyleListResponse {
 
 // Tool Library types
 
-export type ToolType = 'genie_space' | 'vector_index' | 'mcp_server' | 'uc_function';
+export type ToolType = 'genie_space' | 'vector_index' | 'mcp_server' | 'uc_function' | 'model_endpoint';
 
 /**
  * Tool configuration stored in the app-level library.
@@ -306,6 +306,15 @@ export interface UCFunctionToolConfig {
   schema: string;
   function_name: string;
   parameters?: Record<string, {
+    type: string;
+    description?: string;
+    required?: boolean;
+  }>;
+}
+
+export interface ModelEndpointToolConfig {
+  endpoint_name: string;
+  input_schema?: Record<string, {
     type: string;
     description?: string;
     required?: boolean;
@@ -621,6 +630,9 @@ export const configApi = {
   
   discoverVectorIndexes: (): Promise<{ indexes: Record<string, { endpoint_name: string; index_name: string; endpoint_status?: string; index_type?: string }> }> =>
     fetchJson(`${API_BASE}/tool-library/discover/vector`),
+  
+  discoverModelEndpoints: (): Promise<{ endpoints: Record<string, { name: string; state: string; creator?: string }> }> =>
+    fetchJson(`${API_BASE}/tool-library/discover/model-endpoints`),
   
   validateToolConfig: (data: ToolValidateRequest): Promise<ToolValidateResponse> =>
     fetchJson(`${API_BASE}/tool-library/validate`, {

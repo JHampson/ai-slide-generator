@@ -17,6 +17,7 @@ class ToolType(str, Enum):
     VECTOR_INDEX = "vector_index"
     MCP_SERVER = "mcp_server"
     UC_FUNCTION = "uc_function"
+    MODEL_ENDPOINT = "model_endpoint"
 
 
 class ToolLibrary(Base):
@@ -31,6 +32,7 @@ class ToolLibrary(Base):
     - vector_index: {"endpoint_name": "...", "index_name": "...", "num_results": 5}
     - mcp_server: {"connection_name": "..."} (Unity Catalog connection name)
     - uc_function: {"catalog": "...", "schema": "...", "function_name": "..."}
+    - model_endpoint: {"endpoint_name": "...", "input_schema": {...}}
     """
 
     __tablename__ = "tool_library"

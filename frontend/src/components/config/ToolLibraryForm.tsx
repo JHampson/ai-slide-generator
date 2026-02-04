@@ -11,6 +11,7 @@ import { GenieToolConfig } from './tools/GenieToolConfig';
 import { VectorToolConfig } from './tools/VectorToolConfig';
 import { MCPToolConfig } from './tools/MCPToolConfig';
 import { UCFunctionToolConfig } from './tools/UCFunctionToolConfig';
+import { ModelEndpointToolConfig } from './tools/ModelEndpointToolConfig';
 
 interface ToolLibraryFormProps {
   tool: ToolLibraryItem | null;
@@ -42,6 +43,12 @@ const TOOL_TYPES: { value: ToolType; label: string; icon: string; description: s
     label: 'UC Function', 
     icon: '⚡',
     description: 'Execute Unity Catalog SQL functions'
+  },
+  { 
+    value: 'model_endpoint', 
+    label: 'Model Endpoint', 
+    icon: '🤖',
+    description: 'Query Databricks Model Serving endpoints'
   },
 ];
 
@@ -157,6 +164,13 @@ export const ToolLibraryForm: React.FC<ToolLibraryFormProps> = ({
       case 'uc_function':
         return (
           <UCFunctionToolConfig
+            config={config}
+            onChange={handleConfigChange}
+          />
+        );
+      case 'model_endpoint':
+        return (
+          <ModelEndpointToolConfig
             config={config}
             onChange={handleConfigChange}
           />

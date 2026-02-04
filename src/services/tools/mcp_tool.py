@@ -3,9 +3,14 @@ MCP (Model Context Protocol) server tool implementation.
 
 Creates LangChain tools that connect to external MCP servers through
 the Databricks MCP proxy using Unity Catalog connections.
+
+Uses DatabricksMCPClient which handles the MCP Streamable HTTP transport
+protocol internally. Thread isolation is required because DatabricksMCPClient
+uses asyncio.run() internally, which conflicts with FastAPI's event loop.
 """
 
 import concurrent.futures
+import json
 import logging
 from typing import Any
 
@@ -30,12 +35,14 @@ def _call_mcp_in_clean_thread(
     arguments: dict[str, Any],
     host: str,
     token: str,
-) -> dict[str, Any]:
+) -> str:
     """
     Call MCP tool in a completely clean thread with no event loop.
-    
+
     DatabricksMCPClient uses asyncio.run() internally, which requires
     no existing event loop. Running in a thread ensures isolation.
+
+    Returns JSON string for database serialization compatibility.
     """
     try:
         from databricks_mcp import DatabricksMCPClient
@@ -51,8 +58,8 @@ def _call_mcp_in_clean_thread(
     try:
         # Create a fresh workspace client in this thread
         # Use auth_type='pat' to prevent SDK from also using OAuth env vars
-        ws_client = WorkspaceClient(host=host, token=token, auth_type='pat')
-        
+        ws_client = WorkspaceClient(host=host, token=token, auth_type="pat")
+
         # Create MCP client
         mcp_client = DatabricksMCPClient(
             server_url=server_url,
@@ -63,7 +70,7 @@ def _call_mcp_in_clean_thread(
         response = mcp_client.call_tool(tool_name, arguments)
 
         # Parse the response
-        output = {}
+        result = None
         if hasattr(response, "content") and response.content:
             texts = []
             for item in response.content:
@@ -71,14 +78,24 @@ def _call_mcp_in_clean_thread(
                     texts.append(item.text)
                 elif isinstance(item, str):
                     texts.append(item)
-            output["result"] = "\n".join(texts) if texts else str(response.content)
+            result = "\n".join(texts) if texts else str(response.content)
         elif hasattr(response, "data"):
-            output["result"] = response.data
+            result = response.data
         else:
-            output["result"] = str(response)
+            result = str(response)
 
         logger.info(f"MCP tool {tool_name} completed successfully")
-        return output
+
+        # Return as JSON string for database serialization
+        if isinstance(result, str):
+            # Check if it's already valid JSON
+            try:
+                json.loads(result)
+                return result
+            except json.JSONDecodeError:
+                return json.dumps({"result": result})
+        else:
+            return json.dumps({"result": result})
 
     except Exception as e:
         logger.error(f"MCP tool call failed: {e}", exc_info=True)
@@ -101,8 +118,8 @@ def _list_mcp_in_clean_thread(
 
     try:
         # Use auth_type='pat' to prevent SDK from also using OAuth env vars
-        ws_client = WorkspaceClient(host=host, token=token, auth_type='pat')
-        
+        ws_client = WorkspaceClient(host=host, token=token, auth_type="pat")
+
         mcp_client = DatabricksMCPClient(
             server_url=server_url,
             workspace_client=ws_client,
@@ -112,11 +129,15 @@ def _list_mcp_in_clean_thread(
 
         tools = []
         for tool in mcp_tools:
-            tools.append({
-                "name": tool.name,
-                "description": tool.description or "",
-                "input_schema": tool.inputSchema if hasattr(tool, "inputSchema") else {},
-            })
+            tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema
+                    if hasattr(tool, "inputSchema")
+                    else {},
+                }
+            )
         return tools
 
     except Exception as e:
@@ -128,9 +149,13 @@ def call_mcp_tool(
     connection_name: str,
     tool_name: str,
     arguments: dict[str, Any],
-) -> dict[str, Any]:
+) -> str:
     """
     Call a tool on an MCP server via Databricks MCP proxy.
+
+    Uses DatabricksMCPClient which handles the MCP Streamable HTTP
+    transport protocol. Runs in a separate thread to avoid asyncio
+    conflicts with FastAPI.
 
     Args:
         connection_name: Unity Catalog connection name for the MCP server
@@ -138,7 +163,7 @@ def call_mcp_tool(
         arguments: Tool arguments
 
     Returns:
-        Tool result dict
+        JSON string with tool result
 
     Raises:
         MCPToolError: If tool call fails
@@ -146,7 +171,7 @@ def call_mcp_tool(
     logger.info(f"Calling MCP tool: {tool_name} via connection: {connection_name}")
 
     try:
-        # Get user client for authentication
+        # Get user client for authentication (OBO token)
         client = get_user_client()
         host = client.config.host
         token = client.config.token
@@ -155,11 +180,15 @@ def call_mcp_tool(
         server_url = f"{host}/api/2.0/mcp/external/{connection_name}"
 
         # Run in a completely separate thread with no event loop
-        # Use ProcessPoolExecutor-like isolation via ThreadPoolExecutor
+        # This is required because DatabricksMCPClient uses asyncio.run() internally
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
                 _call_mcp_in_clean_thread,
-                server_url, tool_name, arguments, host, token
+                server_url,
+                tool_name,
+                arguments,
+                host,
+                token,
             )
             return future.result(timeout=120)
 
@@ -190,8 +219,7 @@ def list_mcp_tools(connection_name: str) -> list[dict]:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(
-                _list_mcp_in_clean_thread,
-                server_url, host, token
+                _list_mcp_in_clean_thread, server_url, host, token
             )
             return future.result(timeout=60)
 
@@ -308,7 +336,7 @@ def create_mcp_tools(tool_def: ToolLibrary, description: str) -> list[Structured
         InputSchema = create_model(f"{mcp_tool_name}Input", **fields)
 
         def _create_wrapper(tool_name: str, conn_name: str):
-            def _wrapper(**kwargs) -> dict[str, Any]:
+            def _wrapper(**kwargs) -> str:
                 # Remove None values
                 args = {k: v for k, v in kwargs.items() if v is not None}
                 return call_mcp_tool(

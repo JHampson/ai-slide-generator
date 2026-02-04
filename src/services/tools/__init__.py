@@ -17,6 +17,7 @@ from src.services.tools.genie_tool import (
     query_genie_space,
 )
 from src.services.tools.mcp_tool import create_mcp_tools
+from src.services.tools.model_endpoint_tool import ModelEndpointError, create_model_endpoint_tool
 from src.services.tools.uc_function_tool import UCFunctionError, create_uc_function_tool
 from src.services.tools.vector_tool import VectorSearchError, create_vector_tool
 
@@ -39,6 +40,9 @@ __all__ = [
     # UC Function
     "UCFunctionError",
     "create_uc_function_tool",
+    # Model Endpoint
+    "ModelEndpointError",
+    "create_model_endpoint_tool",
 ]
 
 
@@ -96,6 +100,10 @@ def create_tools_for_profile(
 
             elif tool_type == ToolType.UC_FUNCTION.value:
                 tool = create_uc_function_tool(tool_def, description)
+                tools.append(tool)
+
+            elif tool_type == ToolType.MODEL_ENDPOINT.value:
+                tool = create_model_endpoint_tool(tool_def, description)
                 tools.append(tool)
 
             else:

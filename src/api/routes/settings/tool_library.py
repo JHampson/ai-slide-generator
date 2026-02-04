@@ -88,6 +88,7 @@ def create_tool(
     - vector_index: {"endpoint_name": "...", "index_name": "...", "num_results": 5}
     - mcp_server: {"connection_name": "..."} (Unity Catalog connection name)
     - uc_function: {"catalog": "...", "schema": "...", "function_name": "...", "parameters": {...}}
+    - model_endpoint: {"endpoint_name": "...", "input_schema": {...}}
     """
     try:
         # Validate tool type
@@ -284,6 +285,41 @@ def discover_vector_indexes():
         )
 
 
+@router.get("/discover/model-endpoints", response_model=Dict[str, Any])
+def discover_model_endpoints():
+    """
+    List available model serving endpoints from Databricks.
+
+    Returns endpoints that can be added to the tool library.
+    """
+    try:
+        client = get_user_client()
+        endpoints_data = {}
+
+        # List all serving endpoints
+        endpoints = client.serving_endpoints.list()
+
+        for endpoint in endpoints:
+            endpoint_name = endpoint.name
+            state = endpoint.state.ready if endpoint.state else "UNKNOWN"
+
+            # Get endpoint details
+            endpoints_data[endpoint_name] = {
+                "name": endpoint_name,
+                "state": state,
+                "creator": endpoint.creator if hasattr(endpoint, "creator") else None,
+            }
+
+        return {"endpoints": endpoints_data}
+
+    except Exception as e:
+        logger.error(f"Error discovering model endpoints: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to discover model endpoints: {str(e)}",
+        )
+
+
 @router.post("/validate", response_model=ToolValidateResponse)
 def validate_tool_config(data: ToolValidateRequest):
     """
@@ -318,6 +354,14 @@ def validate_tool_config(data: ToolValidateRequest):
                 errors.append("schema is required for UC function tools")
             if not data.config.get("function_name"):
                 errors.append("function_name is required for UC function tools")
+
+        elif data.tool_type == ToolType.MODEL_ENDPOINT.value:
+            if not data.config.get("endpoint_name"):
+                errors.append("endpoint_name is required for model endpoint tools")
+            # input_schema is optional but validate structure if provided
+            input_schema = data.config.get("input_schema")
+            if input_schema and not isinstance(input_schema, dict):
+                errors.append("input_schema must be a dictionary if provided")
 
         else:
             valid_types = [t.value for t in ToolType]

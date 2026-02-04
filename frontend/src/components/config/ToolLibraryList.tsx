@@ -19,6 +19,7 @@ const TOOL_TYPE_LABELS: Record<ToolType, string> = {
   vector_index: 'Vector Index',
   mcp_server: 'MCP Server',
   uc_function: 'UC Function',
+  model_endpoint: 'Model Endpoint',
 };
 
 const TOOL_TYPE_COLORS: Record<ToolType, string> = {
@@ -26,6 +27,7 @@ const TOOL_TYPE_COLORS: Record<ToolType, string> = {
   vector_index: 'bg-blue-100 text-blue-800',
   mcp_server: 'bg-green-100 text-green-800',
   uc_function: 'bg-orange-100 text-orange-800',
+  model_endpoint: 'bg-teal-100 text-teal-800',
 };
 
 const TOOL_TYPE_ICONS: Record<ToolType, string> = {
@@ -33,6 +35,7 @@ const TOOL_TYPE_ICONS: Record<ToolType, string> = {
   vector_index: '🔍',
   mcp_server: '🔌',
   uc_function: '⚡',
+  model_endpoint: '🤖',
 };
 
 export const ToolLibraryList: React.FC<ToolLibraryListProps> = ({
